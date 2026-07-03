@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PackageId>LlamaSharp.ToolCallEnvelopes</PackageId>
+    <AssemblyName>LlamaSharp.ToolCallEnvelopes</AssemblyName>
+    <RootNamespace>LlamaSharp.ToolCallEnvelopes</RootNamespace>
+    <Description>Grammar and envelope helpers for reliable LlamaSharp tool calls.</Description>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+</Project>
