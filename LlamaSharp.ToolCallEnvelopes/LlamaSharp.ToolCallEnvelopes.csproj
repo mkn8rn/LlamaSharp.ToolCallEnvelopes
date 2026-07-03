@@ -6,7 +6,18 @@
     <PackageId>LlamaSharp.ToolCallEnvelopes</PackageId>
     <AssemblyName>LlamaSharp.ToolCallEnvelopes</AssemblyName>
     <RootNamespace>LlamaSharp.ToolCallEnvelopes</RootNamespace>
+    <Version>0.1.0</Version>
+    <Authors>mkn8rn</Authors>
     <Description>Grammar and envelope helpers for reliable LlamaSharp tool calls.</Description>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageTags>llamasharp;llama.cpp;tool-calling;gbnf;json-schema</PackageTags>
+    <RepositoryUrl>https://github.com/mkn8rn/LlamaSharp.ToolCallEnvelopes</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591;CS1574</NoWarn>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
 </Project>
