@@ -20,8 +20,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 WRITTEN OFFER
 
 The source code for any program binaries or compressed scripts that are
-included with mk8.identity can be freely obtained at the following URL:
-https://github.com/mkn8rn/SharpClaw
+included with LlamaSharp.ToolCallEnvelopes can be freely obtained at the
+following URL:
+https://github.com/mkn8rn/LlamaSharp.ToolCallEnvelopes
 
 =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 
