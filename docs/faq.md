@@ -38,6 +38,68 @@ conversation history, rebuilds the prompt with the same tool-aware formatter,
 and calls LlamaSharp again. The next model turn usually produces a normal
 message envelope that explains the answer using the tool result.
 
+## Do tools have to be hardcoded in C#?
+
+No. The package does not require the application's tools to be compiled as
+fixed C# methods or declared ahead of time in source code. What it needs at
+inference time is a set of `ToolDefinition` objects so it can build the
+LlamaSharp prompt and grammar for the current request. Those objects can be
+created from a static list, a database, a plugin system, a user-configured
+assistant definition, or an OpenAI-style request body that contains runtime
+tool definitions.
+
+For example, an application that already receives OpenAI-style tools can map
+each incoming function tool definition into a `ToolDefinition`, preserving the
+function name, description, and JSON Schema parameters.
+
+```csharp
+using System.Text.Json;
+using LlamaSharp.ToolCallEnvelopes;
+
+using var incomingToolJson = JsonDocument.Parse("""
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Gets the current weather for a city.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "city": {
+              "type": "string",
+              "description": "City name, for example Zagreb"
+            },
+            "unit": {
+              "type": "string",
+              "enum": ["celsius", "fahrenheit"]
+            }
+          },
+          "required": ["city"],
+          "additionalProperties": false
+        }
+      }
+    }
+    """);
+
+var function = incomingToolJson.RootElement.GetProperty("function");
+var tool = new ToolDefinition(
+    function.GetProperty("name").GetString()
+        ?? throw new InvalidOperationException("Tool name is required."),
+    function.TryGetProperty("description", out var description)
+        ? description.GetString() ?? string.Empty
+        : string.Empty,
+    function.GetProperty("parameters").Clone());
+```
+
+After that mapping, the normal flow is the same: build the prompt, build the
+grammar from the current tool catalog, run the LlamaSharp model, parse the
+envelope, and execute any returned tool calls in the host application. The
+package does not currently provide a full OpenAI request adapter that accepts
+an entire OpenAI-compatible chat request as input. That adapter can be built
+above this package. The core boundary is lower level: this package works with
+the tool definitions, tool choice, prompt formatting, grammar construction,
+and envelope parsing needed for a local LlamaSharp call.
+
 ## Can tool-call arguments be multilingual too?
 
 Tool-call arguments are JSON, so string values inside the arguments can also
