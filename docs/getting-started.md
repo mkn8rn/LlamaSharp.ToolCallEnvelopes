@@ -22,7 +22,11 @@ ignored by the repository's existing `bin/` rule. Later runs reuse the file when
 the expected byte length is already present. The demo is intentionally
 hardcoded so you can inspect one complete code path in
 [`../.Demo/Program.cs`](../.Demo/Program.cs) without first building an
-application framework around it.
+application framework around it. Its first turn uses
+`ToolChoice.ForFunction("get_weather")` so the demo always exercises the
+tool-call path. That is demonstration forcing, not a requirement for normal
+applications. If a real assistant turn should be allowed to either answer in
+plain text or call a tool, use `ToolChoice.Auto` for that turn instead.
 
 After installing `LlamaSharp.ToolCallEnvelopes`, define your tool catalog. A
 tool has a stable name, a description for the model, and a JSON Schema object
@@ -145,6 +149,19 @@ least one tool call. `ToolChoice.ForFunction("name")` pins the grammar to one
 named tool and a single call. `parallelCalls: false` restricts the calls array
 to a single tool call except where the selected choice is already single-call.
 For example:
+
+```csharp
+var autoGrammarText = LlamaSharpToolGrammar.Build(
+    ToolChoice.Auto,
+    parallelCalls: false,
+    tools: tools,
+    strict: true,
+    allowRefusal: false);
+```
+
+Use `ToolChoice.Auto` for the common case where the model may answer directly
+or call a tool depending on the prompt. The demo uses `ToolChoice.ForFunction`
+only to make the sample reliably demonstrate the tool-call branch. For example:
 
 ```csharp
 var grammarText = LlamaSharpToolGrammar.Build(

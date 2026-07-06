@@ -88,6 +88,9 @@ internal static class Program
             "You are a local demo assistant. Call the weather tool when the user asks for weather.",
             conversation,
             tools,
+            // This demo uses ForFunction to prove the tool-call path every time.
+            // In a normal assistant turn where a plain text answer is also valid,
+            // use ToolChoice.Auto instead so the model may choose message mode.
             ToolChoice.ForFunction(WeatherToolName),
             strictTools: true,
             allowRefusal: false,
