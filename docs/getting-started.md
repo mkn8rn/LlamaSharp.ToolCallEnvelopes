@@ -1,5 +1,13 @@
 # Getting started with LlamaSharp tool-call envelopes
 
+## Install and use
+
+Install the package from
+[NuGet: LlamaSharp.ToolCallEnvelopes](https://www.nuget.org/packages/LlamaSharp.ToolCallEnvelopes).
+This guide then walks from package installation through a runnable demo, tool
+definition, prompt formatting, grammar construction, model output parsing,
+tool execution, and the follow-up answer turn.
+
 This package gives a LlamaSharp application a strict JSON envelope for tool
 calling. It does not load models, run inference, execute tools, persist
 conversation state, or own your application protocol. Its job is narrower: it
