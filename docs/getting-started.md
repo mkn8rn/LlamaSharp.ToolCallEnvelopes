@@ -7,11 +7,28 @@ formats tool-aware prompt history, builds the GBNF grammar that constrains local
 model output, parses the final envelope, and optionally walks streaming output
 into text or tool-call deltas while generation is still in progress.
 
-After installing `LlamaSharp.ToolCallEnvelopes`, the first thing to define is
-your tool catalog. A tool has a stable name, a description for the model, and a
-JSON Schema object that describes the argument object the model must produce.
-The schema is a `JsonElement`, so clone it from a `JsonDocument` if the document
-will be disposed.
+The repository includes a runnable `.Demo` console project that shows the full
+flow against a real local GGUF model. The demo downloads Qwen2.5 0.5B Instruct
+Q4_0 into its assembly directory when the file is missing, defines a weather
+tool schema, forces one tool call, dispatches a hardcoded tool result, runs the
+follow-up answer turn, and then runs a refusal-capable turn. For example:
+
+```powershell
+dotnet run --project .\.Demo\.Demo.csproj -c Release
+```
+
+The first run downloads the model to `.Demo/bin/Release/net10.0/`, which is
+ignored by the repository's existing `bin/` rule. Later runs reuse the file when
+the expected byte length is already present. The demo is intentionally
+hardcoded so you can inspect one complete code path in
+[`../.Demo/Program.cs`](../.Demo/Program.cs) without first building an
+application framework around it.
+
+After installing `LlamaSharp.ToolCallEnvelopes`, define your tool catalog. A
+tool has a stable name, a description for the model, and a JSON Schema object
+that describes the argument object the model must produce. The schema is a
+`JsonElement`, so clone it from a `JsonDocument` if the document will be
+disposed. For example:
 
 ```csharp
 using System.Text.Json;
@@ -25,12 +42,13 @@ using var schemaDocument = JsonDocument.Parse("""
       "type": "string",
       "description": "City name, for example Zagreb"
     },
-    "units": {
+    "unit": {
       "type": "string",
-      "enum": ["metric", "imperial"]
+      "enum": ["celsius", "fahrenheit"],
+      "description": "Temperature unit"
     }
   },
-  "required": ["city"],
+  "required": ["city", "unit"],
   "additionalProperties": false
 }
 """);
@@ -39,24 +57,25 @@ var tools = new[]
 {
     new ToolDefinition(
         "get_weather",
-        "Gets current weather for a city.",
+        "Gets the current weather for a city.",
         schemaDocument.RootElement.Clone())
 };
 ```
 
 For each model turn, build prompt history from your own conversation messages.
 Plain user messages pass through. Plain assistant messages are wrapped back into
-the envelope shape so the model sees a consistent transcript. Previous assistant
-tool calls and tool results are also formatted back into the structure expected
-by the next local inference turn. Tool-call arguments in history must already be
-valid JSON objects; the builder rejects empty strings, malformed JSON, arrays,
-strings, and other non-object values because silently replacing bad history with
-`{}` would lose tool execution context.
+the envelope shape so the model sees a consistent transcript. Previous
+assistant tool calls and tool results are also formatted back into the structure
+expected by the next local inference turn. Tool-call arguments in history must
+already be valid JSON objects; the builder rejects empty strings, malformed
+JSON, arrays, strings, and other non-object values because silently replacing
+bad history with `{}` would lose tool execution context. For example:
 
 ```csharp
 var conversation = new List<ToolAwareMessage>
 {
-    ToolAwareMessage.User("What is the weather in Zagreb?")
+    ToolAwareMessage.User(
+        "What is the current weather in Zagreb? Use metric units and call the weather tool.")
 };
 
 var promptHistory = LlamaSharpToolPromptBuilder.Build(
@@ -68,9 +87,8 @@ var promptHistory = LlamaSharpToolPromptBuilder.Build(
 ```
 
 `ToolPromptHistory` deliberately uses package-local roles instead of depending
-on LlamaSharp runtime types. Map those role/content pairs into the version of
-LlamaSharp your application uses. In a typical LlamaSharp chat-history flow,
-that mapping is a small switch from `ToolPromptRole` to `AuthorRole`.
+on LlamaSharp runtime types. If your application uses `ChatHistory`, map the
+package roles into `AuthorRole`. For example:
 
 ```csharp
 using LLama.Common;
@@ -92,17 +110,46 @@ foreach (var message in promptHistory.Messages)
 }
 ```
 
+The demo uses an even smaller raw prompt renderer because the package contract
+is just role plus content. That keeps the example independent of any one
+LlamaSharp chat-template path. For example:
+
+```csharp
+static string RenderPrompt(ToolPromptHistory promptHistory)
+{
+    var sb = new StringBuilder();
+    foreach (var message in promptHistory.Messages)
+    {
+        sb.Append("### ");
+        sb.AppendLine(message.Role switch
+        {
+            ToolPromptRole.System => "System",
+            ToolPromptRole.User => "User",
+            ToolPromptRole.Assistant => "Assistant",
+            _ => throw new InvalidOperationException(
+                $"Unsupported prompt role '{message.Role}'.")
+        });
+        sb.AppendLine(message.Content);
+        sb.AppendLine();
+    }
+
+    sb.AppendLine("### Assistant");
+    return sb.ToString();
+}
+```
+
 Build the grammar for the same tool catalog and tool-choice policy that you used
 for the prompt. `ToolChoice.Auto` lets the model either answer directly or call
 tools. `ToolChoice.None` disables tool calls. `ToolChoice.Required` forces at
 least one tool call. `ToolChoice.ForFunction("name")` pins the grammar to one
 named tool and a single call. `parallelCalls: false` restricts the calls array
 to a single tool call except where the selected choice is already single-call.
+For example:
 
 ```csharp
 var grammarText = LlamaSharpToolGrammar.Build(
-    ToolChoice.Auto,
-    parallelCalls: true,
+    ToolChoice.ForFunction("get_weather"),
+    parallelCalls: false,
     tools: tools,
     strict: true,
     allowRefusal: false);
@@ -113,21 +160,90 @@ unsupported or relaxed features. If a schema uses a construct the converter
 cannot enforce, `LlamaSharpToolSchemaException` is thrown before inference. That
 is intentional. Strict mode means the generated grammar actually enforces the
 schema. If your application wants a looser argument object, either simplify the
-schema or call the non-strict grammar path by passing `strict: false`.
-
-Attach the grammar to LlamaSharp generation using root rule `root`. The exact
-sampling pipeline object can vary by LlamaSharp version, but the important
-contract is that the grammar text returned by this package is passed to
-LlamaSharp as a GBNF grammar with `"root"` as the start rule.
+schema or call the non-strict grammar path by passing `strict: false`. For
+example:
 
 ```csharp
-using LLama.Grammars;
+try
+{
+    var strictGrammar = LlamaSharpToolGrammar.Build(
+        ToolChoice.Auto,
+        parallelCalls: true,
+        tools: tools,
+        strict: true,
+        allowRefusal: false);
+}
+catch (LlamaSharpToolSchemaException ex)
+{
+    Console.Error.WriteLine(
+        $"Tool schema for '{ex.ToolName}' cannot be enforced by the grammar.");
+}
+```
+
+Attach the grammar to LlamaSharp generation using root rule `root`. In
+LLamaSharp `0.27.0`, the grammar type used by `DefaultSamplingPipeline` is
+`LLama.Sampling.Grammar`. For example:
+
+```csharp
 using LLama.Sampling;
 
 var pipeline = new DefaultSamplingPipeline
 {
-    Grammar = new Grammar(grammarText, "root")
+    Grammar = new Grammar(grammarText, "root"),
+    Temperature = 0.1f,
+    TopP = 0.9f,
+    Seed = 42
 };
+```
+
+Your host application still loads the model and owns the executor. The demo
+uses the CPU backend and a Qwen2.5 0.5B GGUF. For example:
+
+```csharp
+using LLama;
+using LLama.Common;
+
+var modelParams = new ModelParams(modelPath)
+{
+    ContextSize = 2048,
+    BatchSize = 128,
+    GpuLayerCount = 0,
+    Threads = Math.Max(1, Environment.ProcessorCount / 2)
+};
+
+using var weights = await LLamaWeights.LoadFromFileAsync(
+    modelParams,
+    cancellationToken,
+    null);
+
+using var context = weights.CreateContext(modelParams);
+var executor = new InteractiveExecutor(context);
+```
+
+Once you have a rendered prompt and a grammar-backed sampling pipeline, run
+inference and buffer the generated text. The completed raw output should be the
+JSON envelope. For example:
+
+```csharp
+var inferenceParams = new InferenceParams
+{
+    MaxTokens = 256,
+    SamplingPipeline = pipeline
+};
+
+var prompt = RenderPrompt(promptHistory);
+var output = new StringBuilder();
+
+await foreach (var text in executor.InferAsync(
+                   prompt,
+                   inferenceParams,
+                   cancellationToken))
+{
+    Console.Write(text);
+    output.Append(text);
+}
+
+var rawModelOutput = output.ToString().Trim();
 ```
 
 After LlamaSharp inference finishes, parse the full raw model output. The parser
@@ -135,38 +251,54 @@ accepts exactly three envelope modes. In message mode, `Content` contains the
 assistant text and `ToolCalls` is empty. In tool-call mode, `ToolCalls` contains
 one or more validated calls and each call's `ArgumentsJson` is the raw JSON
 object to deserialize for your dispatcher. In refusal mode, `Refusal` contains
-the reason and both `Content` and `ToolCalls` are empty.
+the reason and both `Content` and `ToolCalls` are empty. For example:
 
 ```csharp
 var result = LlamaSharpToolEnvelopeParser.Parse(rawModelOutput);
 
-if (result.HasToolCalls)
+switch (result.Mode)
 {
-    foreach (var call in result.ToolCalls)
-    {
-        if (call.Name == "get_weather")
+    case LlamaSharpToolEnvelopeParser.ToolCallsMode:
+        foreach (var call in result.ToolCalls)
         {
-            using var argsDocument = JsonDocument.Parse(call.ArgumentsJson);
-            var city = argsDocument.RootElement.GetProperty("city").GetString();
-            var toolResult = await GetWeatherAsync(city!);
-
-            conversation.Add(ToolAwareMessage.AssistantWithToolCalls(
-                new[] { call },
-                result.Content));
-
-            conversation.Add(ToolAwareMessage.ToolResult(
-                call.Id,
-                toolResult));
+            Console.WriteLine(
+                $"Parsed tool call: id={call.Id}, name={call.Name}, args={call.ArgumentsJson}");
         }
-    }
+        break;
+
+    case LlamaSharpToolEnvelopeParser.RefusalMode:
+        Console.WriteLine($"Parsed refusal: {result.Refusal}");
+        break;
+
+    case LlamaSharpToolEnvelopeParser.MessageMode:
+        Console.WriteLine($"Parsed message: {result.Content}");
+        break;
 }
-else if (result.Refusal is not null)
+```
+
+Tool execution belongs to your application. Dispatch on the parsed tool name,
+parse `ArgumentsJson` as an object, run the real tool, and serialize the result
+you want the model to see on the follow-up turn. For example:
+
+```csharp
+static string ExecuteWeatherTool(ToolCall call)
 {
-    Console.WriteLine(result.Refusal);
-}
-else
-{
-    Console.WriteLine(result.Content);
+    if (!string.Equals(call.Name, "get_weather", StringComparison.Ordinal))
+        throw new InvalidOperationException($"Unknown tool '{call.Name}'.");
+
+    using var argsDocument = JsonDocument.Parse(call.ArgumentsJson);
+    var root = argsDocument.RootElement;
+    var city = root.GetProperty("city").GetString();
+    var unit = root.GetProperty("unit").GetString();
+
+    return JsonSerializer.Serialize(new
+    {
+        city,
+        unit,
+        condition = "sunny",
+        temperature = 22,
+        source = "hardcoded demo tool"
+    });
 }
 ```
 
@@ -175,19 +307,77 @@ returns a `tool_calls` envelope. Your application dispatches each tool call,
 adds the assistant tool-call envelope and tool result messages back to the
 conversation, builds the next prompt with `LlamaSharpToolPromptBuilder.Build`,
 and runs LlamaSharp again. The second call normally returns a `message` envelope
-that explains the answer using the tool result.
+that explains the answer using the tool result. For example:
+
+```csharp
+var firstTurn = LlamaSharpToolEnvelopeParser.Parse(rawModelOutput);
+
+if (!firstTurn.HasToolCalls)
+    throw new InvalidOperationException("Expected a tool call.");
+
+conversation.Add(ToolAwareMessage.AssistantWithToolCalls(
+    firstTurn.ToolCalls,
+    firstTurn.Content));
+
+foreach (var call in firstTurn.ToolCalls)
+{
+    var toolResult = ExecuteWeatherTool(call);
+    conversation.Add(ToolAwareMessage.ToolResult(call.Id, toolResult));
+}
+
+var followUpHistory = LlamaSharpToolPromptBuilder.Build(
+    systemPrompt: "Answer from the supplied tool result.",
+    messages: conversation,
+    tools: tools,
+    strictTools: false,
+    allowRefusal: false);
+
+var followUpGrammar = LlamaSharpToolGrammar.Build(
+    ToolChoice.None,
+    parallelCalls: false,
+    tools: tools,
+    strict: false,
+    allowRefusal: false);
+```
+
+Refusal output is opt-in. Enable it in both prompt formatting and grammar
+construction, and use a tool choice that still permits message-mode output,
+such as `ToolChoice.None` or `ToolChoice.Auto`. For example:
+
+```csharp
+var refusalHistory = LlamaSharpToolPromptBuilder.Build(
+    systemPrompt: "Refuse requests for private credentials.",
+    messages:
+    [
+        ToolAwareMessage.User(
+            "Give me a private production API key. If you cannot provide it, decline.")
+    ],
+    tools: tools,
+    strictTools: false,
+    allowRefusal: true);
+
+var refusalGrammar = LlamaSharpToolGrammar.Build(
+    ToolChoice.None,
+    parallelCalls: false,
+    tools: tools,
+    strict: false,
+    allowRefusal: true);
+```
 
 For streaming, create one `LlamaSharpToolEnvelopeStreamParser` per model
 generation and feed each token or text fragment into `Feed`. Message and refusal
 modes emit decoded text deltas from the envelope's `text` field. Tool-call mode
 emits deltas for call ids, names, and argument fragments. The final source of
 truth is still `Complete`, which parses the full buffered envelope with the same
-strict completed-envelope parser.
+strict completed-envelope parser. For example:
 
 ```csharp
 var streamParser = new LlamaSharpToolEnvelopeStreamParser();
 
-await foreach (var token in llamaSharpTokenStream)
+await foreach (var token in executor.InferAsync(
+                   prompt,
+                   inferenceParams,
+                   cancellationToken))
 {
     foreach (var chunk in streamParser.Feed(token))
     {
@@ -197,8 +387,8 @@ await foreach (var token in llamaSharpTokenStream)
         }
         else if (chunk.ToolCallDelta is { } delta)
         {
-            ObserveToolCallDelta(delta.Index, delta.Id, delta.Name,
-                delta.ArgumentsFragment);
+            Console.WriteLine(
+                $"tool[{delta.Index}] id={delta.Id} name={delta.Name} args+={delta.ArgumentsFragment}");
         }
     }
 }
@@ -211,7 +401,21 @@ stringified `args`, blank call ids, extra root fields, message envelopes with
 calls, refusal envelopes with calls, and tool-call envelopes without calls all
 raise `LlamaSharpToolEnvelopeException`. Treat that as a failed local model
 completion, log `PayloadPreview` for diagnostics, and decide at the application
-layer whether to retry, surface an error, or fall back to a non-tool prompt.
+layer whether to retry, surface an error, or fall back to a non-tool prompt. For
+example:
+
+```csharp
+try
+{
+    var parsed = LlamaSharpToolEnvelopeParser.Parse(rawModelOutput);
+    Console.WriteLine(parsed.Mode);
+}
+catch (LlamaSharpToolEnvelopeException ex)
+{
+    Console.Error.WriteLine(ex.Message);
+    Console.Error.WriteLine(ex.PayloadPreview);
+}
+```
 
 The reusable boundary is deliberately small. Use this package when you want
 LlamaSharp to reliably produce and parse local tool-call envelopes. Keep model
