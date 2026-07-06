@@ -1,4 +1,5 @@
 <Solution>
   <Project Path="LlamaSharp.ToolCallEnvelopes/LlamaSharp.ToolCallEnvelopes.csproj" />
+  <Project Path=".Demo/.Demo.csproj" />
   <Project Path="LlamaSharp.ToolCallEnvelopes.Tests/LlamaSharp.ToolCallEnvelopes.Tests.csproj" />
 </Solution>
