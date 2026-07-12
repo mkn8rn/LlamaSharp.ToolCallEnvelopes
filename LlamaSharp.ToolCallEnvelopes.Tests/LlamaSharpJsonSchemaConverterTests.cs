@@ -142,4 +142,56 @@ public sealed class LlamaSharpJsonSchemaConverterTests
         LlamaSharpRegexToGrammar.TryConvert("[a-z0-9]+", out var grammar).Should().BeTrue();
         grammar.Should().Contain("a-z0-9");
     }
+
+    [TestCase("a{2}", "{2}")]
+    [TestCase("a{2,}", "{2,}")]
+    [TestCase("a{2,4}", "{2,4}")]
+    [TestCase("a{02,004}", "{2,4}")]
+    [TestCase("a{10000}", "{10000}")]
+    public void RegexConverter_ValidatesAndNormalizesNumericQuantifiers(
+        string pattern,
+        string expectedQuantifier)
+    {
+        LlamaSharpRegexToGrammar.TryConvert(pattern, out var grammar).Should().BeTrue();
+        grammar.Should().Contain(expectedQuantifier);
+    }
+
+    [TestCase("a{bad}")]
+    [TestCase("a{,}")]
+    [TestCase("a{,2}")]
+    [TestCase("a{2,1}")]
+    [TestCase("a{1,,2}")]
+    [TestCase("a{1")]
+    [TestCase("a{10001}")]
+    [TestCase("a{999999999999999999999}")]
+    [TestCase("[z-a]")]
+    [TestCase("[]")]
+    [TestCase("[^]")]
+    [TestCase("[a--z]")]
+    public void RegexConverter_RejectsMalformedQuantifiersAndClasses(string pattern)
+    {
+        LlamaSharpRegexToGrammar.TryConvert(pattern, out _).Should().BeFalse();
+    }
+
+    [Test]
+    public void RegexConverter_PositiveClassDoesNotInjectJsonDelimiters()
+    {
+        LlamaSharpRegexToGrammar.TryConvert("[a-z]+", out var grammar).Should().BeTrue();
+
+        grammar.Should().Be("\"\\\"\" [a-z]+ \"\\\"\"");
+    }
+
+    [Test]
+    public void JsonStringRules_ExcludeRawControlCharacters()
+    {
+        const string validUnescapedClass = @"[^""\\\x00-\x1F]";
+
+        LlamaSharpJsonGrammars.JsonObject().Should().Contain(validUnescapedClass);
+        LlamaSharpJsonGrammars.BuildJsonValueGrammarFragment().Should().Contain(validUnescapedClass);
+        LlamaSharpToolGrammar.Build().Should().Contain(validUnescapedClass);
+        LlamaSharpRegexToGrammar.TryConvert(".", out var dotGrammar).Should().BeTrue();
+        dotGrammar.Should().Contain(validUnescapedClass);
+        LlamaSharpRegexToGrammar.TryConvert("[^a-z]", out var negatedClassGrammar).Should().BeTrue();
+        negatedClassGrammar.Should().Contain("\\x00-\\x1F");
+    }
 }

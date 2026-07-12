@@ -25,7 +25,7 @@ public static class LlamaSharpToolPromptBuilder
         ArgumentNullException.ThrowIfNull(messages);
         ArgumentNullException.ThrowIfNull(tools);
 
-        return Build(
+        return BuildCore(
             systemPrompt,
             messages,
             tools,
@@ -36,7 +36,8 @@ public static class LlamaSharpToolPromptBuilder
                 ImageCount = imageCount,
                 StrictTools = strictTools,
                 AllowRefusal = allowRefusal,
-            });
+            },
+            catalogAuthoritative: false);
     }
 
     /// <summary>
@@ -54,11 +55,26 @@ public static class LlamaSharpToolPromptBuilder
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(options.ToolChoice);
 
+        return BuildCore(
+            systemPrompt,
+            messages,
+            tools,
+            options,
+            catalogAuthoritative: true);
+    }
+
+    private static ToolPromptHistory BuildCore(
+        string? systemPrompt,
+        IReadOnlyList<ToolAwareMessage> messages,
+        IReadOnlyList<ToolDefinition> tools,
+        ToolPromptOptions options,
+        bool catalogAuthoritative)
+    {
         var history = new List<ToolPromptMessage>
         {
             new(
                 ToolPromptRole.System,
-                BuildSystemPrompt(systemPrompt, tools, options))
+                BuildSystemPromptCore(systemPrompt, tools, options, catalogAuthoritative))
         };
 
         foreach (var message in messages)
@@ -79,11 +95,15 @@ public static class LlamaSharpToolPromptBuilder
                     break;
 
                 case "assistant" when message.ToolCalls is { Count: > 0 }:
-                    history.Add(new ToolPromptMessage(ToolPromptRole.Assistant, FormatAssistantToolCalls(message)));
+                    history.Add(new ToolPromptMessage(
+                        ToolPromptRole.Assistant,
+                        FormatAssistantToolCalls(message, options.EnvelopeMode)));
                     break;
 
                 case "assistant":
-                    history.Add(new ToolPromptMessage(ToolPromptRole.Assistant, FormatAssistantMessage(message.Content)));
+                    history.Add(new ToolPromptMessage(
+                        ToolPromptRole.Assistant,
+                        FormatAssistantMessage(message.Content, options.EnvelopeMode)));
                     break;
 
                 default:
@@ -101,7 +121,7 @@ public static class LlamaSharpToolPromptBuilder
         bool strictTools = false,
         bool allowRefusal = false)
     {
-        return BuildSystemPrompt(
+        return BuildSystemPromptCore(
             systemPrompt,
             tools,
             new ToolPromptOptions
@@ -111,7 +131,8 @@ public static class LlamaSharpToolPromptBuilder
                 ImageCount = imageCount,
                 StrictTools = strictTools,
                 AllowRefusal = allowRefusal,
-            });
+            },
+            catalogAuthoritative: false);
     }
 
     /// <summary>
@@ -126,6 +147,22 @@ public static class LlamaSharpToolPromptBuilder
         ArgumentNullException.ThrowIfNull(tools);
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(options.ToolChoice);
+
+        return BuildSystemPromptCore(
+            systemPrompt,
+            tools,
+            options,
+            catalogAuthoritative: true);
+    }
+
+    private static string BuildSystemPromptCore(
+        string? systemPrompt,
+        IReadOnlyList<ToolDefinition> tools,
+        ToolPromptOptions options,
+        bool catalogAuthoritative)
+    {
+        ValidateAuthoritativeCatalog(options.ToolChoice, tools, catalogAuthoritative);
+        var promptTools = SelectPromptTools(tools, options.ToolChoice);
 
         var sb = new StringBuilder();
         if (!string.IsNullOrWhiteSpace(systemPrompt))
@@ -142,14 +179,17 @@ public static class LlamaSharpToolPromptBuilder
                 : $"You have been shown {options.ImageCount} images in this turn, in the order they appear in the conversation. Refer to them naturally in your response.\n\n");
         }
 
-        AppendEnvelopeInstructions(sb, options);
+        AppendEnvelopeInstructions(
+            sb,
+            options,
+            hasCallableTools: !catalogAuthoritative || promptTools.Count > 0);
 
-        if (tools.Count > 0)
+        if (promptTools.Count > 0)
         {
             sb.AppendLine("## Available tools");
             sb.AppendLine();
 
-            foreach (var tool in tools)
+            foreach (var tool in promptTools)
             {
                 sb.Append("### ");
                 sb.AppendLine(tool.Name);
@@ -164,10 +204,14 @@ public static class LlamaSharpToolPromptBuilder
         return sb.ToString().TrimEnd();
     }
 
-    private static void AppendEnvelopeInstructions(StringBuilder sb, ToolPromptOptions options)
+    private static void AppendEnvelopeInstructions(
+        StringBuilder sb,
+        ToolPromptOptions options,
+        bool hasCallableTools)
     {
         var allowsMessage = options.ToolChoice.Mode is ToolChoiceMode.Auto or ToolChoiceMode.None;
-        var allowsTools = options.ToolChoice.Mode is ToolChoiceMode.Auto or ToolChoiceMode.Required or ToolChoiceMode.Named;
+        var allowsTools = (options.ToolChoice.Mode is ToolChoiceMode.Auto or ToolChoiceMode.Required or ToolChoiceMode.Named)
+                          && hasCallableTools;
         var allowsRefusal = options.AllowRefusal && allowsMessage;
 
         sb.AppendLine("## Tool calling");
@@ -199,8 +243,18 @@ public static class LlamaSharpToolPromptBuilder
             }
 
             sb.AppendLine("Rules:");
-            sb.AppendLine("- Use `text` for a final answer, `tool_calls` for one or more tool requests, or `refusal` when declining.");
-            sb.AppendLine("- Every tool call has a unique string `id`, a known tool `name`, and an object-valued `arguments` field.");
+            if (allowsMessage && allowsTools && allowsRefusal)
+                sb.AppendLine("- Use `text` for a final answer, `tool_calls` for one or more tool requests, or `refusal` when declining.");
+            else if (allowsMessage && allowsTools)
+                sb.AppendLine("- Use `text` for a final answer or `tool_calls` for one or more tool requests.");
+            else if (allowsMessage && allowsRefusal)
+                sb.AppendLine("- Use `text` for a final answer or `refusal` when declining.");
+            else if (allowsTools)
+                sb.AppendLine("- Use `tool_calls` for one or more tool requests.");
+            else
+                sb.AppendLine("- Use `text` for the final answer.");
+            if (allowsTools)
+                sb.AppendLine("- Every tool call has a unique string `id`, a known tool `name`, and an object-valued `arguments` field.");
             sb.AppendLine("- Do not include any text outside the JSON object.");
             sb.AppendLine();
             return;
@@ -229,8 +283,11 @@ public static class LlamaSharpToolPromptBuilder
 
         sb.AppendLine("Rules:");
         sb.AppendLine("- `mode`, `text`, and `calls` are always present.");
-        sb.AppendLine("- `args` is always a JSON object, never a JSON-encoded string.");
-        sb.AppendLine("- Generate a unique `id` for each call.");
+        if (allowsTools)
+        {
+            sb.AppendLine("- `args` is always a JSON object, never a JSON-encoded string.");
+            sb.AppendLine("- Generate a unique `id` for each call.");
+        }
         sb.AppendLine("- Do not include any text outside the JSON object.");
         sb.AppendLine();
     }
@@ -291,6 +348,19 @@ public static class LlamaSharpToolPromptBuilder
             new { mode = "message", text = content ?? string.Empty, calls = Array.Empty<object>() },
             JsonOptions);
 
+    private static string FormatAssistantMessage(
+        string? content,
+        ToolEnvelopeMode envelopeMode) =>
+        envelopeMode switch
+        {
+            ToolEnvelopeMode.Inferred => JsonSerializer.Serialize(
+                new { text = content ?? string.Empty },
+                JsonOptions),
+            ToolEnvelopeMode.StrictDeclared => FormatAssistantMessage(content),
+            _ => throw new ArgumentOutOfRangeException(
+                nameof(envelopeMode), envelopeMode, "Unknown envelope mode."),
+        };
+
     public static string FormatAssistantToolCalls(ToolAwareMessage message)
     {
         if (message.ToolCalls is null)
@@ -306,6 +376,30 @@ public static class LlamaSharpToolPromptBuilder
         return JsonSerializer.Serialize(
             new { mode = "tool_calls", text = message.Content ?? string.Empty, calls },
             JsonOptions);
+    }
+
+    private static string FormatAssistantToolCalls(
+        ToolAwareMessage message,
+        ToolEnvelopeMode envelopeMode)
+    {
+        if (envelopeMode == ToolEnvelopeMode.StrictDeclared)
+            return FormatAssistantToolCalls(message);
+        if (envelopeMode != ToolEnvelopeMode.Inferred)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(envelopeMode), envelopeMode, "Unknown envelope mode.");
+        }
+        if (message.ToolCalls is null)
+            throw new ArgumentException("Assistant tool-call formatting requires ToolCalls.", nameof(message));
+
+        var calls = message.ToolCalls.Select(toolCall => new
+        {
+            id = toolCall.Id,
+            name = toolCall.Name,
+            arguments = ParseArgsObject(toolCall.ArgumentsJson),
+        });
+
+        return JsonSerializer.Serialize(new { tool_calls = calls }, JsonOptions);
     }
 
     public static string FormatToolResult(ToolAwareMessage message)
@@ -340,4 +434,46 @@ public static class LlamaSharpToolPromptBuilder
             throw new ArgumentException("Tool call arguments must be a valid JSON object.", nameof(argumentsJson), ex);
         }
     }
+
+    private static void ValidateAuthoritativeCatalog(
+        ToolChoice choice,
+        IReadOnlyList<ToolDefinition> tools,
+        bool catalogAuthoritative)
+    {
+        if (!catalogAuthoritative)
+            return;
+
+        if (choice.Mode == ToolChoiceMode.Required && tools.Count == 0)
+        {
+            throw new ArgumentException(
+                "ToolChoice.Required requires at least one supplied tool.",
+                nameof(tools));
+        }
+
+        if (choice.Mode == ToolChoiceMode.Named
+            && !tools.Any(tool => string.Equals(
+                tool.Name,
+                choice.NamedFunction,
+                StringComparison.Ordinal)))
+        {
+            throw new ArgumentException(
+                $"Named tool choice '{choice.NamedFunction ?? "<none>"}' did not match any supplied tool.",
+                nameof(tools));
+        }
+    }
+
+    private static IReadOnlyList<ToolDefinition> SelectPromptTools(
+        IReadOnlyList<ToolDefinition> tools,
+        ToolChoice choice) =>
+        choice.Mode switch
+        {
+            ToolChoiceMode.None => [],
+            ToolChoiceMode.Named => tools
+                .Where(tool => string.Equals(
+                    tool.Name,
+                    choice.NamedFunction,
+                    StringComparison.Ordinal))
+                .ToArray(),
+            _ => tools,
+        };
 }

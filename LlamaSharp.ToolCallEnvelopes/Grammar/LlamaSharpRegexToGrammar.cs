@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 
 namespace LlamaSharp.ToolCallEnvelopes;
@@ -13,8 +14,9 @@ namespace LlamaSharp.ToolCallEnvelopes;
 /// <para>
 /// Supported surface: literal ASCII characters, character classes
 /// <c>[abc]</c> with optional <c>^</c> negation and single-char
-/// ranges, the dot metachar (any non-quote, non-backslash character),
-/// quantifiers <c>? * + {n} {n,} {n,m}</c>, alternation with top-level
+/// ranges, the dot metachar (any valid unescaped JSON character),
+/// quantifiers <c>? * + {n} {n,} {n,m}</c> with numeric bounds no greater
+/// than 10,000, alternation with top-level
 /// <c>|</c>, non-capturing groups <c>(?:…)</c> and simple capturing
 /// groups <c>(…)</c>, and the anchors <c>^</c> and <c>$</c> which are
 /// implicit anyway because the grammar matches the full string.
@@ -28,6 +30,8 @@ namespace LlamaSharp.ToolCallEnvelopes;
 /// </remarks>
 public static class LlamaSharpRegexToGrammar
 {
+    private const int MaxQuantifierBound = 10_000;
+
     /// <summary>
     /// Attempts to convert <paramref name="pattern"/> to a GBNF body
     /// matching the same language surrounded by JSON string delimiters.
@@ -38,6 +42,18 @@ public static class LlamaSharpRegexToGrammar
         grammarBody = string.Empty;
         if (string.IsNullOrEmpty(pattern))
             return false;
+
+        try
+        {
+            _ = new System.Text.RegularExpressions.Regex(
+                pattern,
+                System.Text.RegularExpressions.RegexOptions.CultureInvariant,
+                TimeSpan.FromMilliseconds(100));
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
 
         // Strip anchors — the outer rule always matches the full string.
         var span = pattern;
@@ -109,14 +125,15 @@ public static class LlamaSharpRegexToGrammar
                 case '*': _pos++; return atom + "*";
                 case '+': _pos++; return atom + "+";
                 case '{':
-                    var saved = _pos;
                     _pos++;
                     var numsStart = _pos;
                     while (!AtEnd && _src[_pos] != '}') _pos++;
-                    if (AtEnd) { _pos = saved; return atom; }
-                    var inside = _src.Slice(numsStart, _pos - numsStart).ToString();
+                    if (AtEnd) throw new ConversionFailed();
+                    var inside = _src.Slice(numsStart, _pos - numsStart);
+                    if (!TryParseQuantifier(inside, out var quantifier))
+                        throw new ConversionFailed();
                     _pos++; // consume '}'
-                    return atom + "{" + inside + "}";
+                    return atom + quantifier;
                 default:
                     return atom;
             }
@@ -134,7 +151,7 @@ public static class LlamaSharpRegexToGrammar
                     return ParseCharClass();
                 case '.':
                     _pos++;
-                    return "[^\"\\\\]";
+                    return "[^\"\\\\\\x00-\\x1F]";
                 case '\\':
                     return ParseEscape();
                 case '$' or '^':
@@ -173,9 +190,14 @@ public static class LlamaSharpRegexToGrammar
             var sb = new StringBuilder();
             sb.Append('[');
             if (negated) sb.Append('^');
-            // Always forbid raw quote and backslash so the enclosing
-            // JSON string delimiters are never violated.
-            sb.Append("\"\\\\");
+            if (negated)
+            {
+                // A negated source class also excludes characters that cannot
+                // appear unescaped inside the surrounding JSON string.
+                sb.Append('"');
+                sb.Append(@"\\");
+                sb.Append(@"\x00-\x1F");
+            }
 
             while (!AtEnd && _src[_pos] != ']')
             {
@@ -198,6 +220,64 @@ public static class LlamaSharpRegexToGrammar
             _pos++; // consume ']'
             sb.Append(']');
             return sb.ToString();
+        }
+
+        private static bool TryParseQuantifier(
+            ReadOnlySpan<char> source,
+            out string quantifier)
+        {
+            quantifier = string.Empty;
+            var comma = source.IndexOf(',');
+            if (comma < 0)
+            {
+                if (!TryParseBound(source, out var exact))
+                    return false;
+
+                quantifier = $"{{{exact.ToString(CultureInfo.InvariantCulture)}}}";
+                return true;
+            }
+
+            if (source[(comma + 1)..].IndexOf(',') >= 0
+                || !TryParseBound(source[..comma], out var minimum))
+            {
+                return false;
+            }
+
+            var maximumSource = source[(comma + 1)..];
+            if (maximumSource.IsEmpty)
+            {
+                quantifier = $"{{{minimum.ToString(CultureInfo.InvariantCulture)},}}";
+                return true;
+            }
+
+            if (!TryParseBound(maximumSource, out var maximum)
+                || maximum < minimum)
+            {
+                return false;
+            }
+
+            quantifier = $"{{{minimum.ToString(CultureInfo.InvariantCulture)},{maximum.ToString(CultureInfo.InvariantCulture)}}}";
+            return true;
+        }
+
+        private static bool TryParseBound(ReadOnlySpan<char> source, out int value)
+        {
+            value = 0;
+            if (source.IsEmpty)
+                return false;
+
+            foreach (var character in source)
+            {
+                if (character is < '0' or > '9')
+                    return false;
+            }
+
+            return int.TryParse(
+                source,
+                NumberStyles.None,
+                CultureInfo.InvariantCulture,
+                out value)
+                && value <= MaxQuantifierBound;
         }
 
         private string ParseEscape()

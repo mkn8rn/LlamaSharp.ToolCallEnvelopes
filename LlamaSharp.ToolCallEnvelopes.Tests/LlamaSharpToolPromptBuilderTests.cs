@@ -110,6 +110,139 @@ public sealed class LlamaSharpToolPromptBuilderTests
     }
 
     [Test]
+    public void Build_InferredAutoWithEmptyCatalog_AdvertisesFinalAnswerOnly()
+    {
+        var history = LlamaSharpToolPromptBuilder.Build(
+            null,
+            [],
+            [],
+            new ToolPromptOptions
+            {
+                ToolChoice = ToolChoice.Auto,
+                EnvelopeMode = ToolEnvelopeMode.Inferred,
+            });
+
+        history.Messages[0].Content.Should().Contain("{\"text\"");
+        history.Messages[0].Content.Should().NotContain("{\"tool_calls\"");
+        history.Messages[0].Content.Should().NotContain("known tool");
+    }
+
+    [Test]
+    public void Build_RequiredWithEmptyAuthoritativeCatalog_ThrowsBeforePrompting()
+    {
+        var act = () => LlamaSharpToolPromptBuilder.Build(
+            null,
+            [],
+            [],
+            new ToolPromptOptions
+            {
+                ToolChoice = ToolChoice.Required,
+                EnvelopeMode = ToolEnvelopeMode.Inferred,
+            });
+
+        act.Should().Throw<ArgumentException>()
+            .WithMessage("*requires at least one supplied tool*");
+    }
+
+    [Test]
+    public void Build_NoneDoesNotAdvertiseSuppliedTools()
+    {
+        var history = LlamaSharpToolPromptBuilder.Build(
+            null,
+            [],
+            [Tool("get_weather", "Gets weather.", """{"type":"object"}""")],
+            new ToolPromptOptions
+            {
+                ToolChoice = ToolChoice.None,
+                EnvelopeMode = ToolEnvelopeMode.Inferred,
+            });
+
+        history.Messages[0].Content.Should().NotContain("Available tools");
+        history.Messages[0].Content.Should().NotContain("get_weather");
+        history.Messages[0].Content.Should().NotContain("tool_calls");
+    }
+
+    [Test]
+    public void Build_NamedChoiceAdvertisesOnlySelectedTool()
+    {
+        var history = LlamaSharpToolPromptBuilder.Build(
+            null,
+            [],
+            [
+                Tool("first", "First tool.", """{"type":"object"}"""),
+                Tool("second", "Second tool.", """{"type":"object"}"""),
+            ],
+            new ToolPromptOptions
+            {
+                ToolChoice = ToolChoice.ForFunction("second"),
+                EnvelopeMode = ToolEnvelopeMode.Inferred,
+            });
+
+        history.Messages[0].Content.Should().Contain("second");
+        history.Messages[0].Content.Should().Contain("Second tool.");
+        history.Messages[0].Content.Should().NotContain("first");
+        history.Messages[0].Content.Should().NotContain("First tool.");
+    }
+
+    [Test]
+    public void Build_InferredMode_FormatsAssistantHistoryWithInferredShapes()
+    {
+        var tools = new[]
+        {
+            Tool("get_weather", "Gets weather.", """{"type":"object"}""")
+        };
+        var history = LlamaSharpToolPromptBuilder.Build(
+            null,
+            [
+                ToolAwareMessage.Assistant("Sure."),
+                ToolAwareMessage.AssistantWithToolCalls(
+                    [new ToolCall("call_1", "get_weather", """{"location":"Paris"}""")]),
+            ],
+            tools,
+            new ToolPromptOptions
+            {
+                ToolChoice = ToolChoice.Auto,
+                EnvelopeMode = ToolEnvelopeMode.Inferred,
+            });
+
+        var assistants = history.Messages
+            .Where(message => message.Role == ToolPromptRole.Assistant)
+            .ToArray();
+        using var messageDocument = JsonDocument.Parse(assistants[0].Content);
+        messageDocument.RootElement.EnumerateObject().Select(property => property.Name)
+            .Should().Equal("text");
+        messageDocument.RootElement.GetProperty("text").GetString().Should().Be("Sure.");
+
+        using var callsDocument = JsonDocument.Parse(assistants[1].Content);
+        callsDocument.RootElement.EnumerateObject().Select(property => property.Name)
+            .Should().Equal("tool_calls");
+        var call = callsDocument.RootElement.GetProperty("tool_calls")[0];
+        call.GetProperty("id").GetString().Should().Be("call_1");
+        call.GetProperty("name").GetString().Should().Be("get_weather");
+        call.GetProperty("arguments").GetProperty("location").GetString().Should().Be("Paris");
+        call.TryGetProperty("args", out _).Should().BeFalse();
+    }
+
+    [Test]
+    public void Build_StrictDeclaredOptions_PreserveDeclaredAssistantHistoryShape()
+    {
+        var history = LlamaSharpToolPromptBuilder.Build(
+            null,
+            [ToolAwareMessage.Assistant("Sure.")],
+            [],
+            new ToolPromptOptions
+            {
+                ToolChoice = ToolChoice.Auto,
+                EnvelopeMode = ToolEnvelopeMode.StrictDeclared,
+            });
+
+        var assistant = history.Messages.Single(message => message.Role == ToolPromptRole.Assistant);
+        using var document = JsonDocument.Parse(assistant.Content);
+        document.RootElement.GetProperty("mode").GetString().Should().Be("message");
+        document.RootElement.GetProperty("calls").GetArrayLength().Should().Be(0);
+    }
+
+    [Test]
     public void Build_WithRefusal_IncludesRefusalShape()
     {
         var history = LlamaSharpToolPromptBuilder.Build(null, [], [], allowRefusal: true);

@@ -8,7 +8,13 @@ namespace LlamaSharp.ToolCallEnvelopes;
 public static class LlamaSharpToolGrammar
 {
     private static readonly string DefaultGrammar =
-        BuildDeclaredGrammar(ToolChoice.Auto, parallelCalls: true, [], strict: false, allowRefusal: false);
+        BuildDeclaredGrammar(
+            ToolChoice.Auto,
+            parallelCalls: true,
+            [],
+            strict: false,
+            allowRefusal: false,
+            catalogAuthoritative: false);
 
     /// <summary>
     /// Returns the original explicit envelope grammar for an auto turn.
@@ -25,7 +31,13 @@ public static class LlamaSharpToolGrammar
         bool allowRefusal = false)
     {
         ArgumentNullException.ThrowIfNull(choice);
-        return BuildDeclaredGrammar(choice, parallelCalls, [], strict: false, allowRefusal);
+        return BuildDeclaredGrammar(
+            choice,
+            parallelCalls,
+            [],
+            strict: false,
+            allowRefusal,
+            catalogAuthoritative: false);
     }
 
     /// <summary>
@@ -41,7 +53,14 @@ public static class LlamaSharpToolGrammar
     {
         ArgumentNullException.ThrowIfNull(choice);
         ArgumentNullException.ThrowIfNull(tools);
-        return BuildDeclaredGrammar(choice, parallelCalls, tools, strict, allowRefusal);
+        ValidateAuthoritativeCatalog(choice, tools);
+        return BuildDeclaredGrammar(
+            choice,
+            parallelCalls,
+            tools,
+            strict,
+            allowRefusal,
+            catalogAuthoritative: true);
     }
 
     /// <summary>
@@ -56,6 +75,7 @@ public static class LlamaSharpToolGrammar
         ArgumentNullException.ThrowIfNull(tools);
         options ??= new ToolEnvelopeGrammarOptions();
         ArgumentNullException.ThrowIfNull(options.ToolChoice);
+        ValidateAuthoritativeCatalog(options.ToolChoice, tools);
 
         return options.EnvelopeMode switch
         {
@@ -64,13 +84,15 @@ public static class LlamaSharpToolGrammar
                 options.ParallelToolCalls,
                 tools,
                 options.StrictTools,
-                options.AllowRefusal),
+                options.AllowRefusal,
+                catalogAuthoritative: true),
             ToolEnvelopeMode.StrictDeclared => BuildDeclaredGrammar(
                 options.ToolChoice,
                 options.ParallelToolCalls,
                 tools,
                 options.StrictTools,
-                options.AllowRefusal),
+                options.AllowRefusal,
+                catalogAuthoritative: true),
             _ => throw new ArgumentOutOfRangeException(
                 nameof(options), options.EnvelopeMode, "Unknown envelope mode.")
         };
@@ -90,11 +112,13 @@ public static class LlamaSharpToolGrammar
         bool parallelCalls,
         IReadOnlyList<ToolDefinition> tools,
         bool strict,
-        bool allowRefusal)
+        bool allowRefusal,
+        bool catalogAuthoritative)
     {
         var rules = BuildCallRules(choice, tools, strict, argumentProperty: "args");
         var allowMessage = choice.Mode is ToolChoiceMode.Auto or ToolChoiceMode.None;
-        var allowToolCalls = choice.Mode is ToolChoiceMode.Auto or ToolChoiceMode.Required or ToolChoiceMode.Named;
+        var allowToolCalls = (choice.Mode is ToolChoiceMode.Auto or ToolChoiceMode.Required or ToolChoiceMode.Named)
+                             && (!catalogAuthoritative || tools.Count > 0);
         var allowRefusalBranch = allowRefusal && allowMessage;
 
         var callArray = BuildCallsArray(choice, parallelCalls, rules.CallObjectRule);
@@ -143,11 +167,13 @@ public static class LlamaSharpToolGrammar
         bool parallelCalls,
         IReadOnlyList<ToolDefinition> tools,
         bool strict,
-        bool allowRefusal)
+        bool allowRefusal,
+        bool catalogAuthoritative)
     {
         var rules = BuildCallRules(choice, tools, strict, argumentProperty: "arguments");
         var allowMessage = choice.Mode is ToolChoiceMode.Auto or ToolChoiceMode.None;
-        var allowToolCalls = choice.Mode is ToolChoiceMode.Auto or ToolChoiceMode.Required or ToolChoiceMode.Named;
+        var allowToolCalls = (choice.Mode is ToolChoiceMode.Auto or ToolChoiceMode.Required or ToolChoiceMode.Named)
+                             && (!catalogAuthoritative || tools.Count > 0);
         var allowRefusalBranch = allowRefusal && allowMessage;
         var rootAlternatives = new List<string>();
         var sb = new StringBuilder();
@@ -204,9 +230,14 @@ public static class LlamaSharpToolGrammar
             if (strict)
             {
                 IReadOnlyList<string> unsupported = ["/ (non-object schema root)"];
-                if (tool.ParametersSchema.ValueKind != System.Text.Json.JsonValueKind.Object
-                    || !LlamaSharpJsonSchemaConverter.TryConvertFragment(
-                        tool.ParametersSchema,
+                if (tool.ParametersSchema.ValueKind != System.Text.Json.JsonValueKind.Object)
+                {
+                    throw new LlamaSharpToolSchemaException(tool.Name, unsupported);
+                }
+
+                var parameterSchema = NormalizeToolParameterSchema(tool);
+                if (!LlamaSharpJsonSchemaConverter.TryConvertFragment(
+                        parameterSchema,
                         $"t{index}-",
                         out var topRule,
                         out var body,
@@ -251,9 +282,9 @@ public static class LlamaSharpToolGrammar
             for (var i = 0; i < fragments.Count; i++)
             {
                 var (name, argsRule, _) = fragments[i];
-                var nameTerminal = strict || choice.Mode == ToolChoiceMode.Named
-                    ? $"\"\\\"{EscapeForJsonInsideGbnf(name)}\\\"\""
-                    : "string";
+                var nameTerminal = choice.Mode == ToolChoiceMode.Named
+                    ? BuildNameTerminal(choice)
+                    : BuildJsonStringTerminal(name);
                 sb.AppendLine(
                     $"call-obj-{i} ::= \"{{\" ws \"\\\"id\\\"\" ws \":\" ws string ws \",\" ws \"\\\"name\\\"\" ws \":\" ws {nameTerminal} ws \",\" ws \"\\\"{argumentProperty}\\\"\" ws \":\" ws {argsRule} \"}}\"");
             }
@@ -268,6 +299,40 @@ public static class LlamaSharpToolGrammar
         }
 
         return new CallGrammarRules(callObjectRule, sb.ToString());
+    }
+
+    private static System.Text.Json.JsonElement NormalizeToolParameterSchema(
+        ToolDefinition tool)
+    {
+        var schema = tool.ParametersSchema;
+        if (schema.TryGetProperty("type", out var type))
+        {
+            if (type.ValueKind == System.Text.Json.JsonValueKind.String
+                && string.Equals(type.GetString(), "object", StringComparison.Ordinal))
+            {
+                return schema;
+            }
+
+            throw new LlamaSharpToolSchemaException(
+                tool.Name,
+                ["/type (tool arguments must have an object root)"]);
+        }
+
+        using var stream = new MemoryStream();
+        using (var writer = new System.Text.Json.Utf8JsonWriter(stream))
+        {
+            writer.WriteStartObject();
+            writer.WriteString("type", "object");
+            foreach (var property in schema.EnumerateObject())
+            {
+                writer.WritePropertyName(property.Name);
+                property.Value.WriteTo(writer);
+            }
+            writer.WriteEndObject();
+        }
+
+        using var document = System.Text.Json.JsonDocument.Parse(stream.ToArray());
+        return document.RootElement.Clone();
     }
 
     private static void AppendCallRules(StringBuilder sb, CallGrammarRules rules)
@@ -298,6 +363,44 @@ public static class LlamaSharpToolGrammar
             ? $"\"\\\"{EscapeForJsonInsideGbnf(choice.NamedFunction!)}\\\"\""
             : "string";
 
+    private static string BuildJsonStringTerminal(string value)
+    {
+        var json = System.Text.Json.JsonSerializer.Serialize(value);
+        var terminal = new StringBuilder(json.Length + 2);
+        terminal.Append('"');
+        foreach (var character in json)
+        {
+            if (character is '"' or '\\')
+                terminal.Append('\\');
+            terminal.Append(character);
+        }
+        terminal.Append('"');
+        return terminal.ToString();
+    }
+
+    private static void ValidateAuthoritativeCatalog(
+        ToolChoice choice,
+        IReadOnlyList<ToolDefinition> tools)
+    {
+        if (choice.Mode == ToolChoiceMode.Required && tools.Count == 0)
+        {
+            throw new ArgumentException(
+                "ToolChoice.Required requires at least one supplied tool.",
+                nameof(tools));
+        }
+
+        if (choice.Mode == ToolChoiceMode.Named
+            && !tools.Any(tool => string.Equals(
+                tool.Name,
+                choice.NamedFunction,
+                StringComparison.Ordinal)))
+        {
+            throw new LlamaSharpToolSchemaException(
+                choice.NamedFunction ?? "<none>",
+                ["Named tool choice did not match any supplied tool."]);
+        }
+    }
+
     private static void AppendJsonPrimitives(StringBuilder sb)
     {
         sb.AppendLine("obj ::= \"{\" ws \"}\" | \"{\" ws kv-pair ( ws \",\" ws kv-pair )* ws \"}\"");
@@ -305,7 +408,7 @@ public static class LlamaSharpToolGrammar
         sb.AppendLine("value ::= string | number | obj | arr | \"true\" | \"false\" | \"null\"");
         sb.AppendLine("arr ::= \"[\" ws \"]\" | \"[\" ws value ( ws \",\" ws value )* ws \"]\"");
         sb.AppendLine("string ::= \"\\\"\" char* \"\\\"\"");
-        sb.AppendLine("char ::= [^\"\\\\] | \"\\\\\" ( \"\\\"\" | \"\\\\\" | \"/\" | \"b\" | \"f\" | \"n\" | \"r\" | \"t\" ) | \"\\\\\" \"u\" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]");
+        sb.AppendLine("char ::= [^\"\\\\\\x00-\\x1F] | \"\\\\\" ( \"\\\"\" | \"\\\\\" | \"/\" | \"b\" | \"f\" | \"n\" | \"r\" | \"t\" ) | \"\\\\\" \"u\" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]");
         sb.AppendLine("number ::= \"-\"? ( \"0\" | [1-9] [0-9]* ) ( \".\" [0-9]+ )? ( [eE] [+-]? [0-9]+ )?");
         sb.AppendLine("integer ::= \"-\"? ( \"0\" | [1-9] [0-9]* )");
         sb.AppendLine("boolean ::= \"true\" | \"false\"");

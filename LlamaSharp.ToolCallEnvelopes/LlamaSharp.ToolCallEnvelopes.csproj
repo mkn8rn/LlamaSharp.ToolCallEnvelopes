@@ -6,7 +6,7 @@
     <PackageId>Supprocom.LlamaSharp.ToolCallEnvelopes</PackageId>
     <AssemblyName>LlamaSharp.ToolCallEnvelopes</AssemblyName>
     <RootNamespace>LlamaSharp.ToolCallEnvelopes</RootNamespace>
-    <Version>0.1.5</Version>
+    <Version>0.1.6</Version>
     <Authors>mkn8rn</Authors>
     <Description>Grammar and envelope helpers for reliable LlamaSharp tool calls.</Description>
     <PackageLicenseExpression>AGPL-3.0-or-later</PackageLicenseExpression>

@@ -159,6 +159,46 @@ public sealed class LlamaSharpToolEnvelopeStreamParserTests
     }
 
     [Test]
+    public void Feed_PropertyLikeTextDoesNotChangeEnvelopeClassification()
+    {
+        var parser = new LlamaSharpToolEnvelopeStreamParser();
+        var chunks = FeedCharacters(
+            parser,
+            """{"text":"literal \"tool_calls\": [{\"id\":\"c\"}]"}""");
+
+        string.Concat(chunks.Where(chunk => chunk.TextDelta is not null).Select(chunk => chunk.TextDelta))
+            .Should().Be("literal \"tool_calls\": [{\"id\":\"c\"}]");
+        chunks.Should().NotContain(chunk => chunk.ToolCallDelta != null);
+        parser.Complete().Kind.Should().Be(ToolEnvelopeResultMode.Message);
+    }
+
+    [Test]
+    public void Feed_SurrogatePairSplitAcrossFragments_RemainsValidUnicode()
+    {
+        var parser = new LlamaSharpToolEnvelopeStreamParser();
+        var chunks = new List<ToolEnvelopeStreamChunk>();
+        chunks.AddRange(parser.Feed("{\"text\":\""));
+        chunks.AddRange(parser.Feed("\uD83D"));
+        chunks.AddRange(parser.Feed("\uDE00\"}"));
+
+        string.Concat(chunks.Where(chunk => chunk.TextDelta is not null).Select(chunk => chunk.TextDelta))
+            .Should().Be("😀");
+        parser.Complete().Content.Should().Be("😀");
+    }
+
+    [Test]
+    public void StreamValidator_ConsumesLongTextIncrementally()
+    {
+        var validator = new LlamaSharpToolEnvelopeStreamValidator();
+        validator.Feed("{\"text\":\"");
+        for (var index = 0; index < 20_000; index++)
+            validator.Feed("x");
+        validator.Feed("\"}");
+
+        validator.RawEnvelope.Length.Should().Be(20_011);
+    }
+
+    [Test]
     public void StrictStreamValidation_RejectsMessageModeWhenCallStarts()
     {
         var parser = new LlamaSharpToolEnvelopeStreamParser(
@@ -167,6 +207,21 @@ public sealed class LlamaSharpToolEnvelopeStreamParserTests
 
         var act = () => parser.Feed(
             """{"mode":"message","text":"x","calls":[{"id":"c"}""");
+
+        act.Should().Throw<LlamaSharpToolEnvelopeException>()
+            .Which.Code.Should().Be("EnvelopeModePayloadMismatch");
+    }
+
+    [Test]
+    public void StrictStreamValidation_RejectsCallsThatPrecedeContradictoryMode()
+    {
+        var parser = new LlamaSharpToolEnvelopeStreamParser(
+            new ToolEnvelopeParserOptions { EnvelopeMode = ToolEnvelopeMode.StrictDeclared },
+            ToolEnvelopeStreamValidation.Strict);
+
+        var act = () => FeedCharacters(
+            parser,
+            """{"calls":[{"id":"c","name":"lookup","args":{}}],"mode":"message","text":""}""");
 
         act.Should().Throw<LlamaSharpToolEnvelopeException>()
             .Which.Code.Should().Be("EnvelopeModePayloadMismatch");

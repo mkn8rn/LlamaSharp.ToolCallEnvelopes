@@ -116,6 +116,54 @@ public sealed class LlamaSharpToolGrammarTests
     }
 
     [Test]
+    public void Build_StrictMissingRootType_NormalizesToolArgumentsToObject()
+    {
+        var grammar = LlamaSharpToolGrammar.BuildCompleteEnvelopeGrammar(
+            [Tool("lookup", """{"properties":{"query":{"type":"string"}},"required":["query"]}""")],
+            new ToolEnvelopeGrammarOptions
+            {
+                ToolChoice = ToolChoice.Required,
+                EnvelopeMode = ToolEnvelopeMode.Inferred,
+                StrictTools = true,
+            });
+
+        grammar.Should().Contain("t0-top-obj");
+        grammar.Should().Contain("\\\"query\\\"");
+        grammar.Should().NotContain("\"\\\"arguments\\\"\" ws \":\" ws value");
+    }
+
+    [Test]
+    public void Build_StrictEmptySchema_NormalizesToolArgumentsToEmptyObject()
+    {
+        var grammar = LlamaSharpToolGrammar.BuildCompleteEnvelopeGrammar(
+            [Tool("empty", "{}")],
+            new ToolEnvelopeGrammarOptions
+            {
+                ToolChoice = ToolChoice.Required,
+                StrictTools = true,
+            });
+
+        grammar.Should().Contain("\"\\\"arguments\\\"\" ws \":\" ws object");
+        grammar.Should().Contain("object ::= obj");
+    }
+
+    [Test]
+    public void Build_StrictExplicitNonObjectRoot_ThrowsBeforeGeneration()
+    {
+        var act = () => LlamaSharpToolGrammar.BuildCompleteEnvelopeGrammar(
+            [Tool("invalid", """{"type":"string"}""")],
+            new ToolEnvelopeGrammarOptions
+            {
+                ToolChoice = ToolChoice.Required,
+                StrictTools = true,
+            });
+
+        act.Should().Throw<LlamaSharpToolSchemaException>()
+            .Which.UnsupportedKeywords.Should().ContainSingle()
+            .Which.Should().Contain("object root");
+    }
+
+    [Test]
     public void Build_StrictNamedTool_EmitsOnlyNamedBranch()
     {
         var tools = new[]
@@ -150,6 +198,150 @@ public sealed class LlamaSharpToolGrammarTests
             strict: true);
 
         act.Should().Throw<LlamaSharpToolSchemaException>();
+    }
+
+    [TestCase(ToolEnvelopeMode.Inferred, true)]
+    [TestCase(ToolEnvelopeMode.Inferred, false)]
+    [TestCase(ToolEnvelopeMode.StrictDeclared, true)]
+    [TestCase(ToolEnvelopeMode.StrictDeclared, false)]
+    public void BuildComplete_AutoWithEmptyCatalog_OmitsToolCallAlternative(
+        ToolEnvelopeMode envelopeMode,
+        bool strictTools)
+    {
+        var grammar = LlamaSharpToolGrammar.BuildCompleteEnvelopeGrammar(
+            [],
+            new ToolEnvelopeGrammarOptions
+            {
+                ToolChoice = ToolChoice.Auto,
+                EnvelopeMode = envelopeMode,
+                StrictTools = strictTools,
+            });
+
+        grammar.Split('\n')[0].Should().Be(envelopeMode == ToolEnvelopeMode.Inferred
+            ? "root ::= inferred-message-envelope"
+            : "root ::= message-envelope");
+        grammar.Should().NotContain("tool-calls-envelope");
+    }
+
+    [TestCase(ToolEnvelopeMode.Inferred)]
+    [TestCase(ToolEnvelopeMode.StrictDeclared)]
+    public void BuildComplete_AutoEmptyCatalogCanStillAllowRefusal(
+        ToolEnvelopeMode envelopeMode)
+    {
+        var grammar = LlamaSharpToolGrammar.BuildCompleteEnvelopeGrammar(
+            [],
+            new ToolEnvelopeGrammarOptions
+            {
+                ToolChoice = ToolChoice.Auto,
+                EnvelopeMode = envelopeMode,
+                AllowRefusal = true,
+            });
+
+        grammar.Split('\n')[0].Should().Contain("refusal-envelope");
+        grammar.Should().NotContain("tool-calls-envelope");
+    }
+
+    [TestCase(ToolEnvelopeMode.Inferred, true)]
+    [TestCase(ToolEnvelopeMode.Inferred, false)]
+    [TestCase(ToolEnvelopeMode.StrictDeclared, true)]
+    [TestCase(ToolEnvelopeMode.StrictDeclared, false)]
+    public void BuildComplete_RequiredWithEmptyCatalog_ThrowsBeforeGeneration(
+        ToolEnvelopeMode envelopeMode,
+        bool strictTools)
+    {
+        var act = () => LlamaSharpToolGrammar.BuildCompleteEnvelopeGrammar(
+            [],
+            new ToolEnvelopeGrammarOptions
+            {
+                ToolChoice = ToolChoice.Required,
+                EnvelopeMode = envelopeMode,
+                StrictTools = strictTools,
+            });
+
+        act.Should().Throw<ArgumentException>()
+            .WithMessage("*requires at least one supplied tool*");
+    }
+
+    [TestCase(ToolEnvelopeMode.Inferred, true)]
+    [TestCase(ToolEnvelopeMode.Inferred, false)]
+    [TestCase(ToolEnvelopeMode.StrictDeclared, true)]
+    [TestCase(ToolEnvelopeMode.StrictDeclared, false)]
+    public void BuildComplete_NoneWithEmptyCatalog_RemainsMessageOnly(
+        ToolEnvelopeMode envelopeMode,
+        bool strictTools)
+    {
+        var grammar = LlamaSharpToolGrammar.BuildCompleteEnvelopeGrammar(
+            [],
+            new ToolEnvelopeGrammarOptions
+            {
+                ToolChoice = ToolChoice.None,
+                EnvelopeMode = envelopeMode,
+                StrictTools = strictTools,
+            });
+
+        grammar.Split('\n')[0].Should().Be(envelopeMode == ToolEnvelopeMode.Inferred
+            ? "root ::= inferred-message-envelope"
+            : "root ::= message-envelope");
+        grammar.Should().NotContain("tool-calls-envelope");
+    }
+
+    [TestCase(ToolEnvelopeMode.Inferred, true)]
+    [TestCase(ToolEnvelopeMode.Inferred, false)]
+    [TestCase(ToolEnvelopeMode.StrictDeclared, true)]
+    [TestCase(ToolEnvelopeMode.StrictDeclared, false)]
+    public void BuildComplete_NamedWithEmptyCatalog_ThrowsBeforeGeneration(
+        ToolEnvelopeMode envelopeMode,
+        bool strictTools)
+    {
+        var act = () => LlamaSharpToolGrammar.BuildCompleteEnvelopeGrammar(
+            [],
+            new ToolEnvelopeGrammarOptions
+            {
+                ToolChoice = ToolChoice.ForFunction("missing"),
+                EnvelopeMode = envelopeMode,
+                StrictTools = strictTools,
+            });
+
+        act.Should().Throw<LlamaSharpToolSchemaException>()
+            .Which.UnsupportedKeywords.Should().ContainSingle()
+            .Which.Should().Contain("did not match");
+    }
+
+    [TestCase(true)]
+    [TestCase(false)]
+    public void BuildComplete_NamedChoiceMustExistInAuthoritativeCatalog(bool strictTools)
+    {
+        var act = () => LlamaSharpToolGrammar.BuildCompleteEnvelopeGrammar(
+            [Tool("other", """{"type":"object"}""")],
+            new ToolEnvelopeGrammarOptions
+            {
+                ToolChoice = ToolChoice.ForFunction("missing"),
+                StrictTools = strictTools,
+            });
+
+        act.Should().Throw<LlamaSharpToolSchemaException>()
+            .Which.UnsupportedKeywords.Should().ContainSingle()
+            .Which.Should().Contain("did not match");
+    }
+
+    [Test]
+    public void BuildComplete_NonStrictCatalogStillPinsKnownToolNames()
+    {
+        var grammar = LlamaSharpToolGrammar.BuildCompleteEnvelopeGrammar(
+            [
+                Tool("first", """{"type":"object"}"""),
+                Tool("second", """{"type":"object"}"""),
+            ],
+            new ToolEnvelopeGrammarOptions
+            {
+                ToolChoice = ToolChoice.Auto,
+                EnvelopeMode = ToolEnvelopeMode.Inferred,
+                StrictTools = false,
+            });
+
+        grammar.Should().Contain("\"\\\"first\\\"\"");
+        grammar.Should().Contain("\"\\\"second\\\"\"");
+        grammar.Should().NotContain("\"\\\"name\\\"\" ws \":\" ws string");
     }
 
     [Test]

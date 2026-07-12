@@ -55,7 +55,7 @@ public static class LlamaSharpJsonGrammars
 
         string ::= "\"" char* "\""
 
-        char   ::= [^"\\]
+        char   ::= [^"\\\x00-\x1F]
                  | "\\" ( "\"" | "\\" | "/" | "b" | "f" | "n" | "r" | "t" )
                  | "\\" "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]
 
@@ -71,7 +71,7 @@ public static class LlamaSharpJsonGrammars
         object-kv ::= string ws ":" ws value
         array    ::= "[" ws "]" | "[" ws value ( ws "," ws value )* ws "]"
         string   ::= "\"" char* "\""
-        char     ::= [^"\\]
+        char     ::= [^"\\\x00-\x1F]
                    | "\\" ( "\"" | "\\" | "/" | "b" | "f" | "n" | "r" | "t" )
                    | "\\" "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]
         number   ::= "-"? ( "0" | [1-9] [0-9]* ) ( "." [0-9]+ )? ( [eE] [+-]? [0-9]+ )?

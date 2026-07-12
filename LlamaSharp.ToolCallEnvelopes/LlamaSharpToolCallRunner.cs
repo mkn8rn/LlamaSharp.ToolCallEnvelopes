@@ -233,10 +233,15 @@ public static class LlamaSharpToolCallRunner
         var repairCount = 0;
         string? lastInvalidOutput = null;
         var allExecutedCalls = new List<ToolCall>();
+        var forcedToolChoiceSatisfied = false;
 
         for (var turn = 0; turn < Math.Max(1, options.MaxTurns); turn++)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            var turnToolChoice = forcedToolChoiceSatisfied
+                                 && (options.ToolChoice.Mode is ToolChoiceMode.Required or ToolChoiceMode.Named)
+                ? ToolChoice.Auto
+                : options.ToolChoice;
 
             ToolPromptHistory? prompt = null;
             string? grammar = null;
@@ -249,7 +254,7 @@ public static class LlamaSharpToolCallRunner
                     tools,
                     new ToolPromptOptions
                     {
-                        ToolChoice = options.ToolChoice,
+                        ToolChoice = turnToolChoice,
                         EnvelopeMode = options.EnvelopeMode,
                         StrictTools = options.StrictTools,
                         AllowRefusal = options.AllowRefusal,
@@ -258,7 +263,7 @@ public static class LlamaSharpToolCallRunner
                     tools,
                     new ToolEnvelopeGrammarOptions
                     {
-                        ToolChoice = options.ToolChoice,
+                        ToolChoice = turnToolChoice,
                         EnvelopeMode = options.EnvelopeMode,
                         ParallelToolCalls = options.ParallelToolCalls,
                         StrictTools = options.StrictTools,
@@ -295,8 +300,10 @@ public static class LlamaSharpToolCallRunner
             LlamaSharpToolEnvelopeException? streamError = null;
             Exception? inferenceError = null;
 
-            var enumerator = executor.InferAsync(prompt!, grammar!, cancellationToken)
-                .GetAsyncEnumerator(cancellationToken);
+            using var turnCancellation =
+                CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            var enumerator = executor.InferAsync(prompt!, grammar!, turnCancellation.Token)
+                .GetAsyncEnumerator(turnCancellation.Token);
             try
             {
                 while (true)
@@ -321,6 +328,7 @@ public static class LlamaSharpToolCallRunner
                     if (feedResult.Error is not null)
                     {
                         streamError = feedResult.Error;
+                        turnCancellation.Cancel();
                         break;
                     }
 
@@ -479,6 +487,7 @@ public static class LlamaSharpToolCallRunner
                 allExecutedCalls.Add(call);
                 messages.Add(ToolAwareMessage.ToolResult(call.Id, toolResult!));
             }
+            forcedToolChoiceSatisfied = true;
         }
 
         yield return new ToolRunFailed(new LlamaSharpToolRunError(
