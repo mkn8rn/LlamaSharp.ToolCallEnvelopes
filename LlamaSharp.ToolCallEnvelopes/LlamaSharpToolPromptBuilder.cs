@@ -25,11 +25,40 @@ public static class LlamaSharpToolPromptBuilder
         ArgumentNullException.ThrowIfNull(messages);
         ArgumentNullException.ThrowIfNull(tools);
 
+        return Build(
+            systemPrompt,
+            messages,
+            tools,
+            new ToolPromptOptions
+            {
+                ToolChoice = ToolChoice.Auto,
+                EnvelopeMode = ToolEnvelopeMode.StrictDeclared,
+                ImageCount = imageCount,
+                StrictTools = strictTools,
+                AllowRefusal = allowRefusal,
+            });
+    }
+
+    /// <summary>
+    /// Builds prompt history using the same envelope mode and tool-choice
+    /// policy that the grammar builder will apply.
+    /// </summary>
+    public static ToolPromptHistory Build(
+        string? systemPrompt,
+        IReadOnlyList<ToolAwareMessage> messages,
+        IReadOnlyList<ToolDefinition> tools,
+        ToolPromptOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(messages);
+        ArgumentNullException.ThrowIfNull(tools);
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(options.ToolChoice);
+
         var history = new List<ToolPromptMessage>
         {
             new(
                 ToolPromptRole.System,
-                BuildSystemPrompt(systemPrompt, tools, imageCount, strictTools, allowRefusal))
+                BuildSystemPrompt(systemPrompt, tools, options))
         };
 
         foreach (var message in messages)
@@ -72,7 +101,31 @@ public static class LlamaSharpToolPromptBuilder
         bool strictTools = false,
         bool allowRefusal = false)
     {
+        return BuildSystemPrompt(
+            systemPrompt,
+            tools,
+            new ToolPromptOptions
+            {
+                ToolChoice = ToolChoice.Auto,
+                EnvelopeMode = ToolEnvelopeMode.StrictDeclared,
+                ImageCount = imageCount,
+                StrictTools = strictTools,
+                AllowRefusal = allowRefusal,
+            });
+    }
+
+    /// <summary>
+    /// Builds the model-facing system prompt for an inferred or explicitly
+    /// declared envelope.
+    /// </summary>
+    public static string BuildSystemPrompt(
+        string? systemPrompt,
+        IReadOnlyList<ToolDefinition> tools,
+        ToolPromptOptions options)
+    {
         ArgumentNullException.ThrowIfNull(tools);
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(options.ToolChoice);
 
         var sb = new StringBuilder();
         if (!string.IsNullOrWhiteSpace(systemPrompt))
@@ -81,42 +134,15 @@ public static class LlamaSharpToolPromptBuilder
             sb.Append("\n\n");
         }
 
-        if (imageCount > 0)
+        if (options.ImageCount > 0)
         {
             sb.Append("## Visual context\n\n");
-            sb.Append(imageCount == 1
+            sb.Append(options.ImageCount == 1
                 ? "You have been shown 1 image in this turn. Refer to it naturally in your response.\n\n"
-                : $"You have been shown {imageCount} images in this turn, in the order they appear in the conversation. Refer to them naturally in your response.\n\n");
+                : $"You have been shown {options.ImageCount} images in this turn, in the order they appear in the conversation. Refer to them naturally in your response.\n\n");
         }
 
-        sb.AppendLine("## Tool calling");
-        sb.AppendLine();
-        sb.AppendLine("You must respond with a JSON object in exactly this shape:");
-        sb.AppendLine();
-        sb.AppendLine("When responding with text only:");
-        sb.AppendLine("""{"mode":"message","text":"<your response here>","calls":[]}""");
-        sb.AppendLine();
-        sb.AppendLine("When calling one or more tools:");
-        sb.AppendLine("""{"mode":"tool_calls","text":"","calls":[{"id":"call_<unique>","name":"<tool_name>","args":{<arguments>}}]}""");
-        sb.AppendLine();
-        if (allowRefusal)
-        {
-            sb.AppendLine("When declining to respond:");
-            sb.AppendLine("""{"mode":"refusal","text":"<short reason>","calls":[]}""");
-            sb.AppendLine();
-        }
-
-        sb.AppendLine("Rules:");
-        sb.AppendLine("- Every response must be valid JSON matching one of the shapes above.");
-        sb.AppendLine(allowRefusal
-            ? "- `mode` is one of: \"message\", \"tool_calls\", \"refusal\"."
-            : "- `mode` is always either \"message\" or \"tool_calls\".");
-        sb.AppendLine("- `text` is always a string.");
-        sb.AppendLine("- `calls` is always an array.");
-        sb.AppendLine("- `args` is always a JSON object, never a JSON-encoded string.");
-        sb.AppendLine("- Generate a unique `id` for each call, such as `call_abc123`.");
-        sb.AppendLine("- Do not include any text outside the JSON object.");
-        sb.AppendLine();
+        AppendEnvelopeInstructions(sb, options);
 
         if (tools.Count > 0)
         {
@@ -127,43 +153,137 @@ public static class LlamaSharpToolPromptBuilder
             {
                 sb.Append("### ");
                 sb.AppendLine(tool.Name);
-                sb.AppendLine(tool.Description);
+                sb.AppendLine(tool.Description ?? string.Empty);
 
-                if (!strictTools
-                    && tool.ParametersSchema.ValueKind == JsonValueKind.Object
-                    && tool.ParametersSchema.TryGetProperty("properties", out var properties)
-                    && properties.ValueKind == JsonValueKind.Object)
-                {
-                    sb.AppendLine("Parameters:");
-                    foreach (var parameter in properties.EnumerateObject())
-                    {
-                        var typeName = "any";
-                        if (parameter.Value.TryGetProperty("type", out var typeElement))
-                            typeName = typeElement.GetString() ?? "any";
-
-                        var description = string.Empty;
-                        if (parameter.Value.TryGetProperty("description", out var descriptionElement))
-                            description = descriptionElement.GetString() ?? string.Empty;
-
-                        sb.Append("  - `");
-                        sb.Append(parameter.Name);
-                        sb.Append("` (");
-                        sb.Append(typeName);
-                        sb.Append(')');
-                        if (!string.IsNullOrEmpty(description))
-                        {
-                            sb.Append(": ");
-                            sb.Append(description);
-                        }
-                        sb.AppendLine();
-                    }
-                }
+                AppendToolParameters(sb, tool);
 
                 sb.AppendLine();
             }
         }
 
         return sb.ToString().TrimEnd();
+    }
+
+    private static void AppendEnvelopeInstructions(StringBuilder sb, ToolPromptOptions options)
+    {
+        var allowsMessage = options.ToolChoice.Mode is ToolChoiceMode.Auto or ToolChoiceMode.None;
+        var allowsTools = options.ToolChoice.Mode is ToolChoiceMode.Auto or ToolChoiceMode.Required or ToolChoiceMode.Named;
+        var allowsRefusal = options.AllowRefusal && allowsMessage;
+
+        sb.AppendLine("## Tool calling");
+        sb.AppendLine();
+        sb.AppendLine("You must respond with one valid JSON object and no surrounding text.");
+        sb.AppendLine();
+
+        if (options.EnvelopeMode == ToolEnvelopeMode.Inferred)
+        {
+            if (allowsMessage)
+            {
+                sb.AppendLine("For a final answer:");
+                sb.AppendLine("""{"text":"<your response here>"}""");
+                sb.AppendLine();
+            }
+
+            if (allowsTools)
+            {
+                sb.AppendLine("When calling one or more tools:");
+                sb.AppendLine("""{"tool_calls":[{"id":"call_<unique>","name":"<tool_name>","arguments":{<arguments>}}]}""");
+                sb.AppendLine();
+            }
+
+            if (allowsRefusal)
+            {
+                sb.AppendLine("When declining to respond:");
+                sb.AppendLine("""{"refusal":"<short reason>"}""");
+                sb.AppendLine();
+            }
+
+            sb.AppendLine("Rules:");
+            sb.AppendLine("- Use `text` for a final answer, `tool_calls` for one or more tool requests, or `refusal` when declining.");
+            sb.AppendLine("- Every tool call has a unique string `id`, a known tool `name`, and an object-valued `arguments` field.");
+            sb.AppendLine("- Do not include any text outside the JSON object.");
+            sb.AppendLine();
+            return;
+        }
+
+        if (allowsMessage)
+        {
+            sb.AppendLine("For a final answer:");
+            sb.AppendLine("""{"mode":"message","text":"<your response here>","calls":[]}""");
+            sb.AppendLine();
+        }
+
+        if (allowsTools)
+        {
+            sb.AppendLine("When calling one or more tools:");
+            sb.AppendLine("""{"mode":"tool_calls","text":"","calls":[{"id":"call_<unique>","name":"<tool_name>","args":{<arguments>}}]}""");
+            sb.AppendLine();
+        }
+
+        if (allowsRefusal)
+        {
+            sb.AppendLine("When declining to respond:");
+            sb.AppendLine("""{"mode":"refusal","text":"<short reason>","calls":[]}""");
+            sb.AppendLine();
+        }
+
+        sb.AppendLine("Rules:");
+        sb.AppendLine("- `mode`, `text`, and `calls` are always present.");
+        sb.AppendLine("- `args` is always a JSON object, never a JSON-encoded string.");
+        sb.AppendLine("- Generate a unique `id` for each call.");
+        sb.AppendLine("- Do not include any text outside the JSON object.");
+        sb.AppendLine();
+    }
+
+    private static void AppendToolParameters(StringBuilder sb, ToolDefinition tool)
+    {
+        if (tool.ParametersSchema.ValueKind != JsonValueKind.Object
+            || !tool.ParametersSchema.TryGetProperty("properties", out var properties)
+            || properties.ValueKind != JsonValueKind.Object)
+        {
+            return;
+        }
+
+        var required = new HashSet<string>(StringComparer.Ordinal);
+        if (tool.ParametersSchema.TryGetProperty("required", out var requiredElement)
+            && requiredElement.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in requiredElement.EnumerateArray())
+            {
+                if (item.ValueKind == JsonValueKind.String && item.GetString() is { } name)
+                    required.Add(name);
+            }
+        }
+
+        sb.AppendLine("Parameters:");
+        foreach (var parameter in properties.EnumerateObject())
+        {
+            var typeName = "any";
+            if (parameter.Value.TryGetProperty("type", out var typeElement)
+                && typeElement.ValueKind == JsonValueKind.String)
+            {
+                typeName = typeElement.GetString() ?? "any";
+            }
+
+            var description = string.Empty;
+            if (parameter.Value.TryGetProperty("description", out var descriptionElement)
+                && descriptionElement.ValueKind == JsonValueKind.String)
+            {
+                description = descriptionElement.GetString() ?? string.Empty;
+            }
+
+            sb.Append("  - `");
+            sb.Append(parameter.Name);
+            sb.Append("` (");
+            sb.Append(typeName);
+            sb.Append(required.Contains(parameter.Name) ? ", required)" : ", optional)");
+            if (!string.IsNullOrEmpty(description))
+            {
+                sb.Append(": ");
+                sb.Append(description);
+            }
+            sb.AppendLine();
+        }
     }
 
     public static string FormatAssistantMessage(string? content) =>

@@ -88,9 +88,10 @@ internal static class Program
             "You are a local demo assistant. Call the weather tool when the user asks for weather.",
             conversation,
             tools,
-            // This demo uses ForFunction to prove the tool-call path every time.
+            // This demo uses ForFunction to force the tool-call path every time.
+            // Grammar forcing is only useful when this turn must call a tool.
             // In a normal assistant turn where a plain text answer is also valid,
-            // use ToolChoice.Auto instead so the model may choose message mode.
+            // use ToolChoice.Auto so the model may choose the inferred text envelope.
             ToolChoice.ForFunction(WeatherToolName),
             strictTools: true,
             allowRefusal: false,
@@ -150,7 +151,8 @@ internal static class Program
             ToolChoice.None,
             strictTools: false,
             allowRefusal: true,
-            cancellationToken);
+            cancellationToken,
+            envelopeMode: ToolEnvelopeMode.StrictDeclared);
 
         RenderParsedResult(result);
     }
@@ -164,21 +166,31 @@ internal static class Program
         ToolChoice toolChoice,
         bool strictTools,
         bool allowRefusal,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ToolEnvelopeMode envelopeMode = ToolEnvelopeMode.Inferred)
     {
         var promptHistory = LlamaSharpToolPromptBuilder.Build(
             systemPrompt,
             messages,
             tools,
-            strictTools: strictTools,
-            allowRefusal: allowRefusal);
+            new ToolPromptOptions
+            {
+                ToolChoice = toolChoice,
+                EnvelopeMode = envelopeMode,
+                StrictTools = strictTools,
+                AllowRefusal = allowRefusal,
+            });
 
-        var grammar = LlamaSharpToolGrammar.Build(
-            toolChoice,
-            parallelCalls: false,
+        var grammar = LlamaSharpToolGrammar.BuildCompleteEnvelopeGrammar(
             tools,
-            strict: strictTools,
-            allowRefusal: allowRefusal);
+            new ToolEnvelopeGrammarOptions
+            {
+                ToolChoice = toolChoice,
+                EnvelopeMode = envelopeMode,
+                ParallelToolCalls = false,
+                StrictTools = strictTools,
+                AllowRefusal = allowRefusal,
+            });
 
         using var context = weights.CreateContext(modelParams);
         var executor = new InteractiveExecutor(context);
@@ -206,7 +218,12 @@ internal static class Program
         Console.WriteLine();
         Console.WriteLine();
 
-        return LlamaSharpToolEnvelopeParser.Parse(output.ToString().Trim());
+        return LlamaSharpToolEnvelopeParser.Parse(
+            output.ToString().Trim(),
+            new ToolEnvelopeParserOptions
+            {
+                EnvelopeMode = envelopeMode,
+            });
     }
 
     private static string RenderPrompt(ToolPromptHistory promptHistory)

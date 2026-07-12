@@ -8,7 +8,29 @@ namespace LlamaSharp.ToolCallEnvelopes;
 public sealed record ToolDefinition(
     string Name,
     string Description,
-    JsonElement ParametersSchema);
+    JsonElement ParametersSchema)
+{
+    /// <summary>
+    /// Creates a tool definition from a JSON Schema string supplied at runtime.
+    /// </summary>
+    public static ToolDefinition FromJsonSchema(
+        string name,
+        string description,
+        string jsonSchema)
+    {
+        ArgumentNullException.ThrowIfNull(jsonSchema);
+
+        try
+        {
+            using var document = JsonDocument.Parse(jsonSchema);
+            return new ToolDefinition(name, description, document.RootElement.Clone());
+        }
+        catch (JsonException ex)
+        {
+            throw new ArgumentException("The tool parameter schema must be valid JSON.", nameof(jsonSchema), ex);
+        }
+    }
+}
 
 /// <summary>
 /// A tool invocation contained in a completed envelope.
@@ -82,6 +104,20 @@ public sealed record ToolEnvelopeResult(
     string? Refusal)
 {
     public bool HasToolCalls => ToolCalls.Count > 0;
+
+    /// <summary>
+    /// The normalized result kind. <see cref="Mode"/> remains a string for
+    /// compatibility with the original package contract.
+    /// </summary>
+    public ToolEnvelopeResultMode Kind => Mode switch
+    {
+        LlamaSharpToolEnvelopeParser.MessageMode => ToolEnvelopeResultMode.Message,
+        LlamaSharpToolEnvelopeParser.ToolCallsMode => ToolEnvelopeResultMode.ToolCalls,
+        LlamaSharpToolEnvelopeParser.RefusalMode => ToolEnvelopeResultMode.Refusal,
+        _ => throw new InvalidOperationException($"Unknown envelope result mode '{Mode}'.")
+    };
+
+    public string? AssistantText => Content;
 }
 
 /// <summary>

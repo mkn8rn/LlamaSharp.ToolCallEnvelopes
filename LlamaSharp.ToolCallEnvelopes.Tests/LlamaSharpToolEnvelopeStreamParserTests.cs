@@ -105,13 +105,71 @@ public sealed class LlamaSharpToolEnvelopeStreamParserTests
     [Test]
     public void Complete_MalformedEnvelope_ThrowsAfterStreaming()
     {
-        var parser = new LlamaSharpToolEnvelopeStreamParser();
+        var parser = new LlamaSharpToolEnvelopeStreamParser(
+            new ToolEnvelopeParserOptions { EnvelopeMode = ToolEnvelopeMode.StrictDeclared });
         parser.Feed("""{"mode":"message","text":"Hello","calls":[{"id":"c","name":"n","args":{}}]}""");
 
         var act = () => parser.Complete();
 
         act.Should().Throw<LlamaSharpToolEnvelopeException>()
             .WithMessage("*Message envelopes must not contain tool calls*");
+    }
+
+    [Test]
+    public void Feed_InferredMessageWithoutMode_StreamsText()
+    {
+        var parser = new LlamaSharpToolEnvelopeStreamParser();
+        var chunks = FeedCharacters(parser, """{"text":"Hallo"}""");
+
+        string.Concat(chunks.Where(c => c.TextDelta is not null).Select(c => c.TextDelta))
+            .Should().Be("Hallo");
+        parser.Complete().Kind.Should().Be(ToolEnvelopeResultMode.Message);
+    }
+
+    [Test]
+    public void Feed_InferredToolCallsWithArgumentsProperty_EmitsDeltas()
+    {
+        var parser = new LlamaSharpToolEnvelopeStreamParser();
+        var chunks = FeedCharacters(
+            parser,
+            """{"tool_calls":[{"id":"c","name":"lookup","arguments":{"q":"x"}}]}""");
+
+        var deltas = chunks
+            .Where(c => c.ToolCallDelta is not null)
+            .Select(c => c.ToolCallDelta!)
+            .ToArray();
+
+        deltas.Should().Contain(d => d.Id == "c");
+        deltas.Should().Contain(d => d.Name == "lookup");
+        ConcatArgs(deltas, 0).Should().Be("{\"q\":\"x\"}");
+    }
+
+    [Test]
+    public void Feed_InferredLegacyMessageWithCalls_SwitchesToCallDeltas()
+    {
+        var parser = new LlamaSharpToolEnvelopeStreamParser();
+        var chunks = FeedCharacters(
+            parser,
+            """{"mode":"message","text":"ignored","calls":[{"id":"c","name":"lookup","args":{}}]}""");
+
+        chunks.Select(chunk => chunk.ToolCallDelta)
+            .Where(delta => delta is not null)
+            .Should().Contain(delta => delta!.Name == "lookup");
+        parser.Complete().Kind.Should().Be(ToolEnvelopeResultMode.ToolCalls);
+    }
+
+    [Test]
+    public void StrictStreamValidation_RejectsMessageModeWhenCallStarts()
+    {
+        var parser = new LlamaSharpToolEnvelopeStreamParser(
+            new ToolEnvelopeParserOptions { EnvelopeMode = ToolEnvelopeMode.StrictDeclared },
+            ToolEnvelopeStreamValidation.Strict);
+
+        var act = () => parser.Feed(
+            """{"mode":"message","text":"x","calls":[{"id":"c"}""");
+
+        act.Should().Throw<LlamaSharpToolEnvelopeException>()
+            .Which.Code.Should().Be("EnvelopeModePayloadMismatch");
     }
 
     private static List<ToolEnvelopeStreamChunk> FeedCharacters(

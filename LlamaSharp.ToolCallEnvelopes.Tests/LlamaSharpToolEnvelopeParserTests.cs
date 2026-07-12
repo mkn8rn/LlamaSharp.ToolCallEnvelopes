@@ -56,6 +56,62 @@ public sealed class LlamaSharpToolEnvelopeParserTests
     }
 
     [Test]
+    public void Parse_InferredMessageWithoutMode_ReturnsContent()
+    {
+        var result = LlamaSharpToolEnvelopeParser.Parse("""{"text":"こんにちは"}""");
+
+        result.Kind.Should().Be(ToolEnvelopeResultMode.Message);
+        result.Content.Should().Be("こんにちは");
+    }
+
+    [Test]
+    public void Parse_InferredToolCallsWithArgumentsProperty_ReturnsCalls()
+    {
+        var result = LlamaSharpToolEnvelopeParser.Parse("""
+            {
+              "tool_calls": [
+                {
+                  "id": "call_1",
+                  "name": "get_weather",
+                  "arguments": { "city": "Zagreb" }
+                }
+              ]
+            }
+            """);
+
+        result.Kind.Should().Be(ToolEnvelopeResultMode.ToolCalls);
+        using var arguments = JsonDocument.Parse(result.ToolCalls.Single().ArgumentsJson);
+        arguments.RootElement.GetProperty("city").GetString().Should().Be("Zagreb");
+    }
+
+    [Test]
+    public void Parse_InferredLegacyMessageModeWithCalls_UsesCallsAsSourceOfTruth()
+    {
+        var result = LlamaSharpToolEnvelopeParser.Parse("""
+            {
+              "mode": "message",
+              "text": "The model mislabeled this call.",
+              "calls": [{ "id": "call_1", "name": "lookup", "args": {} }]
+            }
+            """);
+
+        result.Kind.Should().Be(ToolEnvelopeResultMode.ToolCalls);
+        result.ToolCalls.Should().ContainSingle().Which.Name.Should().Be("lookup");
+    }
+
+    [Test]
+    public void Parse_StrictDeclaredContradictionIncludesCodeAndPath()
+    {
+        var act = () => LlamaSharpToolEnvelopeParser.Parse(
+            """{"mode":"message","text":"x","calls":[{"id":"c","name":"n","args":{}}]}""",
+            new ToolEnvelopeParserOptions { EnvelopeMode = ToolEnvelopeMode.StrictDeclared });
+
+        var error = act.Should().Throw<LlamaSharpToolEnvelopeException>().Which;
+        error.Code.Should().Be("EnvelopeModePayloadMismatch");
+        error.JsonPath.Should().Be("$.calls");
+    }
+
+    [Test]
     public void Parse_InvalidJson_ThrowsEnvelopeExceptionWithJsonInnerException()
     {
         var act = () => LlamaSharpToolEnvelopeParser.Parse("not json");
@@ -77,7 +133,8 @@ public sealed class LlamaSharpToolEnvelopeParserTests
     public void Parse_MissingMode_Throws()
     {
         var act = () => LlamaSharpToolEnvelopeParser.Parse(
-            """{"text":"fallback","calls":[]}""");
+            """{"text":"fallback","calls":[]}""",
+            new ToolEnvelopeParserOptions { EnvelopeMode = ToolEnvelopeMode.StrictDeclared });
 
         act.Should().Throw<LlamaSharpToolEnvelopeException>()
             .WithMessage("*missing required root property 'mode'*");
@@ -97,7 +154,8 @@ public sealed class LlamaSharpToolEnvelopeParserTests
     public void Parse_MessageWithCalls_Throws()
     {
         var act = () => LlamaSharpToolEnvelopeParser.Parse(
-            """{"mode":"message","text":"x","calls":[{"id":"c","name":"n","args":{}}]}""");
+            """{"mode":"message","text":"x","calls":[{"id":"c","name":"n","args":{}}]}""",
+            new ToolEnvelopeParserOptions { EnvelopeMode = ToolEnvelopeMode.StrictDeclared });
 
         act.Should().Throw<LlamaSharpToolEnvelopeException>()
             .WithMessage("*Message envelopes must not contain tool calls*");
@@ -107,7 +165,8 @@ public sealed class LlamaSharpToolEnvelopeParserTests
     public void Parse_RefusalWithCalls_Throws()
     {
         var act = () => LlamaSharpToolEnvelopeParser.Parse(
-            """{"mode":"refusal","text":"no","calls":[{"id":"c","name":"n","args":{}}]}""");
+            """{"mode":"refusal","text":"no","calls":[{"id":"c","name":"n","args":{}}]}""",
+            new ToolEnvelopeParserOptions { EnvelopeMode = ToolEnvelopeMode.StrictDeclared });
 
         act.Should().Throw<LlamaSharpToolEnvelopeException>()
             .WithMessage("*Refusal envelopes must not contain tool calls*");
@@ -171,7 +230,8 @@ public sealed class LlamaSharpToolEnvelopeParserTests
     public void Parse_ModeWithWrongCasing_Throws()
     {
         var act = () => LlamaSharpToolEnvelopeParser.Parse(
-            """{"mode":"Tool_Calls","text":"","calls":[{"id":"c","name":"n","args":{}}]}""");
+            """{"mode":"Tool_Calls","text":"","calls":[{"id":"c","name":"n","args":{}}]}""",
+            new ToolEnvelopeParserOptions { EnvelopeMode = ToolEnvelopeMode.StrictDeclared });
 
         act.Should().Throw<LlamaSharpToolEnvelopeException>()
             .WithMessage("*Unsupported envelope mode*");
@@ -181,7 +241,8 @@ public sealed class LlamaSharpToolEnvelopeParserTests
     public void Parse_ExtraRootProperty_Throws()
     {
         var act = () => LlamaSharpToolEnvelopeParser.Parse(
-            """{"mode":"message","text":"x","calls":[],"debug":true}""");
+            """{"mode":"message","text":"x","calls":[],"debug":true}""",
+            new ToolEnvelopeParserOptions { EnvelopeMode = ToolEnvelopeMode.StrictDeclared });
 
         act.Should().Throw<LlamaSharpToolEnvelopeException>()
             .WithMessage("*unsupported root property 'debug'*");

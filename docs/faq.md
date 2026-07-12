@@ -38,6 +38,38 @@ conversation history, rebuilds the prompt with the same tool-aware formatter,
 and calls LlamaSharp again. The next model turn usually produces a normal
 message envelope that explains the answer using the tool result.
 
+## Where do the tool and parameter descriptions reach the model?
+
+They reach the model through the system prompt, not through the grammar. When
+you call `LlamaSharpToolPromptBuilder.Build` or `BuildSystemPrompt`, the package
+writes each `ToolDefinition` name and description and the top-level parameter
+names, types, required status, and descriptions into an `Available tools`
+section. The grammar receives the same schemas separately and constrains the
+JSON structure, argument names, types, enums, and required fields. A grammar can
+enforce that `location` is a string; only the prompt can explain that
+`location` means a city or region. This remains true in strict schema mode. If
+you build only a grammar and supply a completely custom prompt, the host must
+include those natural-language descriptions itself.
+
+For example:
+
+```csharp
+var prompt = LlamaSharpToolPromptBuilder.Build(
+    systemPrompt: "Use the available tools when they are appropriate.",
+    messages: [ToolAwareMessage.User("What is the weather in Zagreb?")],
+    tools: tools,
+    options: new ToolPromptOptions
+    {
+        ToolChoice = ToolChoice.Auto,
+        EnvelopeMode = ToolEnvelopeMode.Inferred,
+        StrictTools = true,
+    });
+```
+
+The resulting system message contains the tool and parameter descriptions. The
+separate grammar built from `tools` constrains the model's generated payload but
+does not replace that prompt section.
+
 ## Do tools have to be hardcoded in C#?
 
 No. The package does not require the application's tools to be compiled as
@@ -94,11 +126,11 @@ var tool = new ToolDefinition(
 After that mapping, the normal flow is the same: build the prompt, build the
 grammar from the current tool catalog, run the LlamaSharp model, parse the
 envelope, and execute any returned tool calls in the host application. The
-package does not currently provide a full OpenAI request adapter that accepts
-an entire OpenAI-compatible chat request as input. That adapter can be built
-above this package. The core boundary is lower level: this package works with
-the tool definitions, tool choice, prompt formatting, grammar construction,
-and envelope parsing needed for a local LlamaSharp call.
+package does not provide a full OpenAI request adapter that accepts an entire
+OpenAI-compatible chat request as input. That adapter can be built above this
+package. The core boundary is lower level: this package works with the runtime
+tool definitions, tool choice, prompt formatting, grammar construction, and
+envelope parsing needed for a local LlamaSharp call.
 
 ## Can tool-call arguments be multilingual too?
 
@@ -113,12 +145,13 @@ host application.
 ## How do I use it after installing the package?
 
 Define your tools with stable names, descriptions, and JSON Schema argument
-objects. Build prompt history with `LlamaSharpToolPromptBuilder.Build`, map the
-returned package-local prompt messages into your LlamaSharp chat-history type,
-build the grammar with `LlamaSharpToolGrammar.Build`, and attach that grammar to
+objects. Build prompt history with `LlamaSharpToolPromptBuilder.Build`, build a
+complete inferred grammar with
+`LlamaSharpToolGrammar.BuildCompleteEnvelopeGrammar`, and attach that grammar to
 LlamaSharp generation with the `root` start rule. After inference finishes,
 parse the raw model text with `LlamaSharpToolEnvelopeParser.Parse`. If the
 result contains tool calls, execute them in your application and run a follow-up
-model turn with the tool results included in history. If the result is a
-message, display the message text. If the result is a refusal, handle it as your
-application policy requires.
+model turn with the tool results included in history. If you prefer the package
+to manage those repeated turns, adapt your LlamaSharp executor to
+`ILlamaSharpToolExecutor` and call `LlamaSharpToolCallRunner.RunAsync` or
+`RunStreamingAsync`.

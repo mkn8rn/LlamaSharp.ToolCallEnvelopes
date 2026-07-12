@@ -50,7 +50,7 @@ public sealed class LlamaSharpToolPromptBuilderTests
     }
 
     [Test]
-    public void Build_WithStrictTools_OmitsParameterBullets()
+    public void Build_WithStrictTools_RetainsParameterSemantics()
     {
         var tools = new[]
         {
@@ -67,8 +67,46 @@ public sealed class LlamaSharpToolPromptBuilderTests
         var history = LlamaSharpToolPromptBuilder.Build(null, [], tools, strictTools: true);
 
         history.Messages[0].Content.Should().Contain("get_weather");
-        history.Messages[0].Content.Should().NotContain("Parameters:");
-        history.Messages[0].Content.Should().NotContain("City name");
+        history.Messages[0].Content.Should().Contain("Parameters:");
+        history.Messages[0].Content.Should().Contain("location");
+        history.Messages[0].Content.Should().Contain("City name");
+    }
+
+    [Test]
+    public void Build_InferredMode_UsesPayloadShapesAndRetainsDescriptionsInStrictMode()
+    {
+        var tools = new[]
+        {
+            Tool("get_weather", "Gets weather.", """
+                {
+                  "type": "object",
+                  "properties": {
+                    "location": {
+                      "type": "string",
+                      "description": "City or region whose weather is required."
+                    }
+                  },
+                  "required": ["location"]
+                }
+                """)
+        };
+
+        var history = LlamaSharpToolPromptBuilder.Build(
+            null,
+            [],
+            tools,
+            new ToolPromptOptions
+            {
+                ToolChoice = ToolChoice.Auto,
+                EnvelopeMode = ToolEnvelopeMode.Inferred,
+                StrictTools = true,
+            });
+
+        history.Messages[0].Content.Should().Contain("{\"text\"");
+        history.Messages[0].Content.Should().Contain("{\"tool_calls\"");
+        history.Messages[0].Content.Should().Contain("City or region whose weather is required.");
+        history.Messages[0].Content.Should().Contain("required");
+        history.Messages[0].Content.Should().NotContain("{\"mode\":\"message\"");
     }
 
     [Test]

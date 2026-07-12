@@ -8,10 +8,22 @@ namespace LlamaSharp.ToolCallEnvelopes;
 /// </summary>
 public sealed class LlamaSharpToolEnvelopeStreamParser
 {
+    private readonly ToolEnvelopeParserOptions _options;
+    private readonly LlamaSharpToolEnvelopeStreamValidator? _validator;
     private readonly StringBuilder _buffer = new();
     private readonly EnvelopeToolCallStreamWalker _toolWalker = new();
-    private readonly EnvelopeTextStreamWalker _textWalker = new();
+    private readonly EnvelopeTextStreamWalker _textWalker = new("text");
+    private readonly EnvelopeTextStreamWalker _refusalWalker = new("refusal");
     private string? _mode;
+
+    public LlamaSharpToolEnvelopeStreamParser(
+        ToolEnvelopeParserOptions? options = null,
+        ToolEnvelopeStreamValidation validation = ToolEnvelopeStreamValidation.Off)
+    {
+        _options = options ?? new ToolEnvelopeParserOptions();
+        if (validation == ToolEnvelopeStreamValidation.Strict)
+            _validator = new LlamaSharpToolEnvelopeStreamValidator(_options.EnvelopeMode);
+    }
 
     public string RawEnvelope => _buffer.ToString();
 
@@ -21,11 +33,24 @@ public sealed class LlamaSharpToolEnvelopeStreamParser
 
         var chunks = new List<ToolEnvelopeStreamChunk>();
         _buffer.Append(token);
+        _validator?.Feed(token);
+
+        if (_options.EnvelopeMode == ToolEnvelopeMode.Inferred
+            && _mode == LlamaSharpToolEnvelopeParser.MessageMode
+            && ContainsNonEmptyArrayProperty(_buffer.ToString(), "calls"))
+        {
+            _mode = LlamaSharpToolEnvelopeParser.ToolCallsMode;
+            foreach (var delta in _toolWalker.Feed(_buffer.ToString()))
+                chunks.Add(ToolEnvelopeStreamChunk.ToolCall(delta));
+            return chunks;
+        }
 
         if (_mode is null)
         {
             var text = _buffer.ToString();
-            if (text.Contains("\"tool_calls\"", StringComparison.Ordinal))
+            if (ContainsMode(text, LlamaSharpToolEnvelopeParser.ToolCallsMode)
+                || ContainsProperty(text, "tool_calls") ||
+                (_options.EnvelopeMode == ToolEnvelopeMode.Inferred && ContainsProperty(text, "calls")))
             {
                 _mode = LlamaSharpToolEnvelopeParser.ToolCallsMode;
                 foreach (var delta in _toolWalker.Feed(text))
@@ -33,7 +58,17 @@ public sealed class LlamaSharpToolEnvelopeStreamParser
                 return chunks;
             }
 
-            if (text.Contains("\"message\"", StringComparison.Ordinal))
+            if (ContainsProperty(text, "refusal") &&
+                _options.EnvelopeMode == ToolEnvelopeMode.Inferred)
+            {
+                _mode = LlamaSharpToolEnvelopeParser.RefusalMode;
+                foreach (var delta in _refusalWalker.Feed(text))
+                    chunks.Add(ToolEnvelopeStreamChunk.Text(delta));
+                return chunks;
+            }
+
+            if (ContainsMode(text, LlamaSharpToolEnvelopeParser.MessageMode)
+                || (_options.EnvelopeMode == ToolEnvelopeMode.Inferred && ContainsProperty(text, "text")))
             {
                 _mode = LlamaSharpToolEnvelopeParser.MessageMode;
                 foreach (var delta in _textWalker.Feed(text))
@@ -41,7 +76,8 @@ public sealed class LlamaSharpToolEnvelopeStreamParser
                 return chunks;
             }
 
-            if (text.Contains("\"refusal\"", StringComparison.Ordinal))
+            if (ContainsMode(text, LlamaSharpToolEnvelopeParser.RefusalMode)
+                || ContainsProperty(text, "refusal"))
             {
                 _mode = LlamaSharpToolEnvelopeParser.RefusalMode;
                 foreach (var delta in _textWalker.Feed(text))
@@ -57,6 +93,13 @@ public sealed class LlamaSharpToolEnvelopeStreamParser
             foreach (var delta in _toolWalker.Feed(token))
                 chunks.Add(ToolEnvelopeStreamChunk.ToolCall(delta));
         }
+        else if (_mode == LlamaSharpToolEnvelopeParser.RefusalMode
+                 && _options.EnvelopeMode == ToolEnvelopeMode.Inferred
+                 && ContainsProperty(_buffer.ToString(), "refusal"))
+        {
+            foreach (var delta in _refusalWalker.Feed(token))
+                chunks.Add(ToolEnvelopeStreamChunk.Text(delta));
+        }
         else
         {
             foreach (var delta in _textWalker.Feed(token))
@@ -67,7 +110,69 @@ public sealed class LlamaSharpToolEnvelopeStreamParser
     }
 
     public ToolEnvelopeResult Complete() =>
-        LlamaSharpToolEnvelopeParser.Parse(_buffer.ToString());
+        LlamaSharpToolEnvelopeParser.Parse(_buffer.ToString(), _options);
+
+    private static bool ContainsProperty(string text, string propertyName)
+    {
+        var needle = $"\"{propertyName}\"";
+        var offset = 0;
+        while (true)
+        {
+            var index = text.IndexOf(needle, offset, StringComparison.Ordinal);
+            if (index < 0)
+                return false;
+
+            var cursor = index + needle.Length;
+            while (cursor < text.Length && char.IsWhiteSpace(text[cursor]))
+                cursor++;
+            if (cursor < text.Length && text[cursor] == ':')
+                return true;
+            offset = index + needle.Length;
+        }
+    }
+
+    private static bool ContainsMode(string text, string mode)
+    {
+        var modeProperty = "\"mode\"";
+        var modeValue = $"\"{mode}\"";
+        var index = text.IndexOf(modeProperty, StringComparison.Ordinal);
+        if (index < 0)
+            return false;
+
+        var colon = text.IndexOf(':', index + modeProperty.Length);
+        if (colon < 0)
+            return false;
+
+        var valueStart = colon + 1;
+        while (valueStart < text.Length && char.IsWhiteSpace(text[valueStart]))
+            valueStart++;
+        return text.AsSpan(valueStart).StartsWith(modeValue, StringComparison.Ordinal);
+    }
+
+    private static bool ContainsNonEmptyArrayProperty(string text, string propertyName)
+    {
+        var needle = $"\"{propertyName}\"";
+        var index = text.IndexOf(needle, StringComparison.Ordinal);
+        if (index < 0)
+            return false;
+
+        var cursor = index + needle.Length;
+        while (cursor < text.Length && char.IsWhiteSpace(text[cursor]))
+            cursor++;
+        if (cursor >= text.Length || text[cursor] != ':')
+            return false;
+
+        cursor++;
+        while (cursor < text.Length && char.IsWhiteSpace(text[cursor]))
+            cursor++;
+        if (cursor >= text.Length || text[cursor] != '[')
+            return false;
+
+        cursor++;
+        while (cursor < text.Length && char.IsWhiteSpace(text[cursor]))
+            cursor++;
+        return cursor < text.Length && text[cursor] == '{';
+    }
 
     private sealed class EnvelopeTextStreamWalker
     {
@@ -82,9 +187,15 @@ public sealed class LlamaSharpToolEnvelopeStreamParser
 
         private Phase _phase = Phase.SeekingTextKey;
         private readonly StringBuilder _seek = new();
+        private readonly string _propertyName;
         private bool _escape;
         private bool _unicodeEscape;
         private readonly StringBuilder _unicode = new(4);
+
+        public EnvelopeTextStreamWalker(string propertyName)
+        {
+            _propertyName = propertyName;
+        }
 
         public IEnumerable<string> Feed(string token)
         {
@@ -102,7 +213,7 @@ public sealed class LlamaSharpToolEnvelopeStreamParser
                     _seek.Append(ch);
                     if (_seek.Length > 16)
                         _seek.Remove(0, _seek.Length - 16);
-                    if (_seek.ToString().Contains("\"text\"", StringComparison.Ordinal))
+                    if (_seek.ToString().Contains($"\"{_propertyName}\"", StringComparison.Ordinal))
                     {
                         _seek.Clear();
                         _phase = Phase.AfterTextKey;
@@ -244,9 +355,15 @@ public sealed class LlamaSharpToolEnvelopeStreamParser
                         _seek.Remove(0, _seek.Length - 32);
                     var s = _seek.ToString();
                     var idx = s.IndexOf("\"calls\"", StringComparison.Ordinal);
+                    var toolCallsIdx = s.IndexOf("\"tool_calls\"", StringComparison.Ordinal);
+                    if (toolCallsIdx >= 0 && (idx < 0 || toolCallsIdx < idx))
+                        idx = toolCallsIdx;
                     if (idx >= 0)
                     {
-                        var rest = s[(idx + "\"calls\"".Length)..];
+                        var propertyLength = s.AsSpan(idx).StartsWith("\"tool_calls\"", StringComparison.Ordinal)
+                            ? "\"tool_calls\"".Length
+                            : "\"calls\"".Length;
+                        var rest = s[(idx + propertyLength)..];
                         var colon = rest.IndexOf(':');
                         if (colon >= 0)
                         {
@@ -326,6 +443,7 @@ public sealed class LlamaSharpToolEnvelopeStreamParser
                             "id" => Phase.ReadingIdValue,
                             "name" => Phase.ReadingNameValue,
                             "args" => Phase.ReadingArgsValue,
+                            "arguments" => Phase.ReadingArgsValue,
                             _ => Phase.SkippingUnknownValue,
                         };
                         _awaitingStringOpen = _phase is Phase.ReadingIdValue or Phase.ReadingNameValue;

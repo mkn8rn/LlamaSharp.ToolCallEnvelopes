@@ -6,10 +6,24 @@ namespace LlamaSharp.ToolCallEnvelopes;
 public sealed class LlamaSharpToolEnvelopeException : Exception
 {
     public string PayloadPreview { get; }
+    public string Code { get; }
+    public string JsonPath { get; }
 
     public LlamaSharpToolEnvelopeException(string message, string payload, Exception? inner = null)
+        : this("EnvelopeInvalid", message, payload, "$", inner)
+    {
+    }
+
+    public LlamaSharpToolEnvelopeException(
+        string code,
+        string message,
+        string payload,
+        string jsonPath = "$",
+        Exception? inner = null)
         : base(message, inner)
     {
+        Code = code;
+        JsonPath = jsonPath;
         PayloadPreview = payload[..Math.Min(payload.Length, 200)];
     }
 }
