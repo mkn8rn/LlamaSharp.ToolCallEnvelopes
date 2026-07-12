@@ -21,8 +21,11 @@ deltas while generation is still in progress.
 The repository includes a runnable `.Demo` console project that shows the full
 flow against a real local GGUF model. The demo downloads Qwen2.5 0.5B Instruct
 Q4_0 into its assembly directory when the file is missing, defines a weather
-tool schema, forces one tool call, dispatches a hardcoded tool result, runs the
-follow-up answer turn, and then runs a refusal-capable turn. For example:
+tool schema, and then runs both control-flow styles. Its unmanaged path forces
+one tool call, dispatches a hardcoded tool result, and runs the follow-up answer
+turn. Its managed runner path uses `ToolChoice.Auto`, so the model may answer
+directly or call the tool. The demo then runs a refusal-capable turn. For
+example:
 
 ```powershell
 dotnet run --project .\.Demo\.Demo.csproj -c Release

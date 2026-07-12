@@ -22,7 +22,7 @@ WRITTEN OFFER
 The source code for any program binaries or compressed scripts that are
 included with LlamaSharp.ToolCallEnvelopes can be freely obtained at the
 following URL:
-https://github.com/mkn8rn/LlamaSharp.ToolCallEnvelopes
+https://github.com/Supprocom/LlamaSharp.ToolCallEnvelopes
 
 =-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 

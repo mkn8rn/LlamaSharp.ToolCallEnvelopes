@@ -10,6 +10,6 @@ into model loading, session management, or provider runtime code.
 Install the package from
 [NuGet: Supprocom.LlamaSharp.ToolCallEnvelopes](https://www.nuget.org/packages/Supprocom.LlamaSharp.ToolCallEnvelopes).
 For the install-to-working-tool-calls flow, see the
-[getting started guide](https://github.com/supprocom/LlamaSharp.ToolCallEnvelopes/blob/main/docs/getting-started.md).
+[getting started guide](https://github.com/Supprocom/LlamaSharp.ToolCallEnvelopes/blob/main/docs/getting-started.md).
 For FAQ, see
-[docs/faq.md](https://github.com/supprocom/LlamaSharp.ToolCallEnvelopes/blob/main/docs/faq.md).
+[docs/faq.md](https://github.com/Supprocom/LlamaSharp.ToolCallEnvelopes/blob/main/docs/faq.md).
