@@ -6,12 +6,13 @@
     <PackageId>Supprocom.LlamaSharp.ToolCallEnvelopes</PackageId>
     <AssemblyName>LlamaSharp.ToolCallEnvelopes</AssemblyName>
     <RootNamespace>LlamaSharp.ToolCallEnvelopes</RootNamespace>
-    <Version>0.1.6</Version>
+    <Version>0.1.7</Version>
     <Authors>mkn8rn</Authors>
     <Description>Grammar and envelope helpers for reliable LlamaSharp tool calls.</Description>
     <PackageLicenseExpression>AGPL-3.0-or-later</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageTags>llamasharp;llama.cpp;tool-calling;gbnf;json-schema</PackageTags>
+    <PackageReleaseNotes>Fixes inferred grammar compatibility with declared mode/text/calls prompts without requiring caller changes.</PackageReleaseNotes>
     <PackageProjectUrl>https://github.com/Supprocom/LlamaSharp.ToolCallEnvelopes</PackageProjectUrl>
     <RepositoryUrl>https://github.com/Supprocom/LlamaSharp.ToolCallEnvelopes</RepositoryUrl>
     <RepositoryType>git</RepositoryType>

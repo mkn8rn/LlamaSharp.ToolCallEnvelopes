@@ -11,7 +11,7 @@ tool execution, and the follow-up answer turn.
 This package gives a LlamaSharp application a constrained JSON envelope for tool
 calling. The normal inferred envelope uses `text`, `tool_calls`, or `refusal` as
 the payload discriminator, while strict-declared mode remains available for
-hosts that need the original `mode`, `text`, and `calls` shape. It does not load
+hosts that need the declared `mode`, `text`, and `calls` shape. It does not load
 models, run inference, execute tools, persist conversation state, or own your
 application protocol. Its job is narrower: it formats tool-aware prompt
 history, builds the GBNF grammar that constrains local model output, parses the
@@ -259,6 +259,9 @@ tools. `ToolChoice.None` disables tool calls. `ToolChoice.Required` forces at
 least one tool call. `ToolChoice.ForFunction("name")` pins the grammar to one
 named tool and a single call. `parallelCalls: false` restricts the calls array
 to a single tool call except where the selected choice is already single-call.
+An inferred grammar admits both its minimal payloads and the complete declared
+shape. This keeps the no-options prompt overload grammar-compatible while the
+options-based inferred prompt continues to request the smaller payload.
 For example:
 
 ```csharp
@@ -384,8 +387,8 @@ var rawModelOutput = output.ToString().Trim();
 
 After LlamaSharp inference finishes, parse the full raw model output. In the
 default inferred mode, a `text` property is a final answer, a non-empty
-`tool_calls` or legacy `calls` array is a tool request, and a `refusal` property
-is a refusal. The parser also accepts the original explicit
+`tool_calls` or declared `calls` array is a tool request, and a `refusal` property
+is a refusal. The parser also accepts the explicit
 `mode`/`text`/`calls` envelope for compatibility. In message mode, `Content`
 contains the assistant text and `ToolCalls` is empty. In tool-call mode,
 `ToolCalls` contains one or more validated calls and each call's
@@ -469,8 +472,12 @@ var followUpHistory = LlamaSharpToolPromptBuilder.Build(
     systemPrompt: "Answer from the supplied tool result.",
     messages: conversation,
     tools: tools,
-    strictTools: false,
-    allowRefusal: false);
+    options: new ToolPromptOptions
+    {
+        ToolChoice = ToolChoice.Auto,
+        EnvelopeMode = ToolEnvelopeMode.Inferred,
+        StrictTools = false,
+    });
 
 var followUpGrammar = LlamaSharpToolGrammar.BuildCompleteEnvelopeGrammar(
     tools,
@@ -684,7 +691,7 @@ var finalResult = streamParser.Complete();
 Malformed envelopes are not silently repaired. Invalid JSON, wrong property
 types, stringified argument objects, blank call ids, extra root fields, new
 inferred payload conflicts, and empty tool-call arrays raise
-`LlamaSharpToolEnvelopeException`. If a host needs the original explicit
+`LlamaSharpToolEnvelopeException`. If a host needs the explicit declared
 contract and contradiction errors, parse with
 `EnvelopeMode.StrictDeclared`; that mode rejects missing or wrong-cased modes,
 message envelopes with calls, and refusal envelopes with calls. Treat an

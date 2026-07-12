@@ -22,8 +22,8 @@ public static class LlamaSharpToolEnvelopeParser
 
     /// <summary>
     /// Parses an envelope. The default is inferred mode, while
-    /// <see cref="ToolEnvelopeMode.StrictDeclared"/> preserves the original
-    /// explicit contract and rejects mode/payload contradictions.
+    /// <see cref="ToolEnvelopeMode.StrictDeclared"/> requires the declared
+    /// contract and rejects mode/payload contradictions.
     /// </summary>
     public static ToolEnvelopeResult Parse(
         string json,

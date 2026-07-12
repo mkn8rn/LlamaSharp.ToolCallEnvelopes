@@ -65,9 +65,11 @@ public sealed class LlamaSharpToolCallRunnerTests
         result.AssistantText.Should().Be("It is sunny.");
         executor.Requests.Should().HaveCount(2);
         executor.Requests[0].Grammar.Split('\n')[0]
-            .Should().Be("root ::= inferred-tool-calls-envelope");
+            .Should().Be("root ::= inferred-tool-calls-envelope | declared-tool-calls-envelope");
         executor.Requests[1].Grammar.Split('\n')[0]
-            .Should().Be("root ::= inferred-message-envelope | inferred-tool-calls-envelope");
+            .Should().Be(
+                "root ::= inferred-message-envelope | inferred-tool-calls-envelope | " +
+                "declared-message-envelope | declared-tool-calls-envelope");
         executor.Requests[0].Prompt.Messages[0].Content.Should().NotContain("{\"text\"");
         executor.Requests[1].Prompt.Messages[0].Content.Should().Contain("{\"text\"");
     }
@@ -95,6 +97,26 @@ public sealed class LlamaSharpToolCallRunnerTests
         result.Value.Metadata.RepairCount.Should().Be(1);
         executor.Requests[1].Prompt.Messages.Should().Contain(message =>
             message.Content.Contains("previous response was not a valid tool envelope", StringComparison.Ordinal));
+    }
+
+    [Test]
+    public async Task RunAsync_InferredModeAcceptsDeclaredToolAndMessageEnvelopes()
+    {
+        var executor = new FakeExecutor(
+            """{"mode":"tool_calls","text":"","calls":[{"id":"call_1","name":"get_weather","args":{"city":"Zagreb"}}]}""",
+            """{"mode":"message","text":"It is sunny.","calls":[]}""");
+
+        var result = await LlamaSharpToolCallRunner.RunAsync(
+            executor,
+            [ToolAwareMessage.User("Use the weather tool.")],
+            [WeatherTool()],
+            (_, _) => Task.FromResult("{\"condition\":\"sunny\"}"));
+
+        result.AssistantText.Should().Be("It is sunny.");
+        result.Metadata.ToolCalls.Should().ContainSingle().Which.Id.Should().Be("call_1");
+        executor.Requests.Should().HaveCount(2);
+        executor.Requests[0].Grammar.Should().Contain("declared-tool-calls-envelope");
+        executor.Requests[1].Grammar.Should().Contain("declared-message-envelope");
     }
 
     [Test]
@@ -197,9 +219,13 @@ public sealed class LlamaSharpToolCallRunnerTests
                 StrictTools = true,
             });
 
-        grammar.Should().Contain("root ::= inferred-message-envelope | inferred-tool-calls-envelope");
+        grammar.Should().Contain(
+            "root ::= inferred-message-envelope | inferred-tool-calls-envelope | " +
+            "declared-message-envelope | declared-tool-calls-envelope");
         grammar.Should().Contain("inferred-message-envelope ::= \"{\" ws \"\\\"text\\\"\"");
         grammar.Should().Contain("inferred-tool-calls-envelope ::= \"{\" ws \"\\\"tool_calls\\\"\"");
+        grammar.Should().Contain("declared-message-envelope ::= \"{\" ws \"\\\"mode\\\"\"");
+        grammar.Should().Contain("declared-tool-calls-envelope ::= \"{\" ws \"\\\"mode\\\"\"");
         grammar.Should().NotContain("mode-val +");
     }
 

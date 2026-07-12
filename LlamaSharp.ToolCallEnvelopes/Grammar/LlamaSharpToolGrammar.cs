@@ -17,13 +17,12 @@ public static class LlamaSharpToolGrammar
             catalogAuthoritative: false);
 
     /// <summary>
-    /// Returns the original explicit envelope grammar for an auto turn.
+    /// Returns the declared envelope grammar for an auto turn.
     /// </summary>
     public static string Build() => DefaultGrammar;
 
     /// <summary>
-    /// Builds a complete explicit envelope grammar using the original package
-    /// contract.
+    /// Builds a complete declared envelope grammar.
     /// </summary>
     public static string Build(
         ToolChoice choice,
@@ -66,7 +65,9 @@ public static class LlamaSharpToolGrammar
     /// <summary>
     /// Builds the complete-envelope grammar described by <paramref name="options"/>.
     /// The root is a union of whole message, tool-call, and refusal alternatives;
-    /// mode and payload fields are never generated independently.
+    /// mode and payload fields are never generated independently. Inferred mode
+    /// admits both minimal payloads and the complete declared shape so either
+    /// prompt-builder overload remains grammar-compatible.
     /// </summary>
     public static string BuildCompleteEnvelopeGrammar(
         IReadOnlyList<ToolDefinition> tools,
@@ -115,7 +116,7 @@ public static class LlamaSharpToolGrammar
         bool allowRefusal,
         bool catalogAuthoritative)
     {
-        var rules = BuildCallRules(choice, tools, strict, argumentProperty: "args");
+        var rules = BuildCallRules(choice, tools, strict, argumentNameRule: "\"\\\"args\\\"\"");
         var allowMessage = choice.Mode is ToolChoiceMode.Auto or ToolChoiceMode.None;
         var allowToolCalls = (choice.Mode is ToolChoiceMode.Auto or ToolChoiceMode.Required or ToolChoiceMode.Named)
                              && (!catalogAuthoritative || tools.Count > 0);
@@ -124,27 +125,13 @@ public static class LlamaSharpToolGrammar
         var callArray = BuildCallsArray(choice, parallelCalls, rules.CallObjectRule);
         var sb = new StringBuilder();
         var rootAlternatives = new List<string>();
-
-        if (allowMessage)
-        {
-            rootAlternatives.Add("message-envelope");
-            sb.AppendLine(
-                "message-envelope ::= \"{\" ws \"\\\"mode\\\"\" ws \":\" ws \"\\\"message\\\"\" ws \",\" ws \"\\\"text\\\"\" ws \":\" ws string ws \",\" ws \"\\\"calls\\\"\" ws \":\" ws empty-calls \"}\"");
-        }
-
-        if (allowToolCalls)
-        {
-            rootAlternatives.Add("tool-calls-envelope");
-            sb.AppendLine(
-                "tool-calls-envelope ::= \"{\" ws \"\\\"mode\\\"\" ws \":\" ws \"\\\"tool_calls\\\"\" ws \",\" ws \"\\\"text\\\"\" ws \":\" ws string ws \",\" ws \"\\\"calls\\\"\" ws \":\" ws calls-arr \"}\"");
-        }
-
-        if (allowRefusalBranch)
-        {
-            rootAlternatives.Add("refusal-envelope");
-            sb.AppendLine(
-                "refusal-envelope ::= \"{\" ws \"\\\"mode\\\"\" ws \":\" ws \"\\\"refusal\\\"\" ws \",\" ws \"\\\"text\\\"\" ws \":\" ws string ws \",\" ws \"\\\"calls\\\"\" ws \":\" ws empty-calls \"}\"");
-        }
+        AppendDeclaredEnvelopeRules(
+            sb,
+            rootAlternatives,
+            allowMessage,
+            allowToolCalls,
+            allowRefusalBranch,
+            rulePrefix: string.Empty);
 
         if (rootAlternatives.Count == 0)
             throw new InvalidOperationException("ToolChoice produced an unreachable grammar.");
@@ -170,12 +157,13 @@ public static class LlamaSharpToolGrammar
         bool allowRefusal,
         bool catalogAuthoritative)
     {
-        var rules = BuildCallRules(choice, tools, strict, argumentProperty: "arguments");
+        var rules = BuildCallRules(choice, tools, strict, argumentNameRule: "argument-name");
         var allowMessage = choice.Mode is ToolChoiceMode.Auto or ToolChoiceMode.None;
         var allowToolCalls = (choice.Mode is ToolChoiceMode.Auto or ToolChoiceMode.Required or ToolChoiceMode.Named)
                              && (!catalogAuthoritative || tools.Count > 0);
         var allowRefusalBranch = allowRefusal && allowMessage;
         var rootAlternatives = new List<string>();
+        var declaredAlternatives = new List<string>();
         var sb = new StringBuilder();
 
         if (allowMessage)
@@ -197,21 +185,67 @@ public static class LlamaSharpToolGrammar
             sb.AppendLine("inferred-refusal-envelope ::= \"{\" ws \"\\\"refusal\\\"\" ws \":\" ws string \"}\"");
         }
 
+        AppendDeclaredEnvelopeRules(
+            sb,
+            declaredAlternatives,
+            allowMessage,
+            allowToolCalls,
+            allowRefusalBranch,
+            rulePrefix: "declared-");
+
         if (rootAlternatives.Count == 0)
             throw new InvalidOperationException("ToolChoice produced an unreachable grammar.");
 
+        rootAlternatives.AddRange(declaredAlternatives);
         sb.Insert(0, $"root ::= {string.Join(" | ", rootAlternatives)}\n\n");
+        if (allowMessage)
+            sb.AppendLine("empty-calls ::= \"[\" ws \"]\"");
         sb.AppendLine($"calls-arr ::= {BuildCallsArray(choice, parallelCalls, rules.CallObjectRule)}");
+        if (allowToolCalls)
+            sb.AppendLine("argument-name ::= \"\\\"arguments\\\"\" | \"\\\"args\\\"\"");
         AppendCallRules(sb, rules);
         AppendJsonPrimitives(sb);
         return sb.ToString();
+    }
+
+    private static void AppendDeclaredEnvelopeRules(
+        StringBuilder grammar,
+        ICollection<string> alternatives,
+        bool allowMessage,
+        bool allowToolCalls,
+        bool allowRefusal,
+        string rulePrefix)
+    {
+        if (allowMessage)
+        {
+            var rule = $"{rulePrefix}message-envelope";
+            alternatives.Add(rule);
+            grammar.AppendLine(
+                $"{rule} ::= \"{{\" ws \"\\\"mode\\\"\" ws \":\" ws \"\\\"message\\\"\" ws \",\" ws \"\\\"text\\\"\" ws \":\" ws string ws \",\" ws \"\\\"calls\\\"\" ws \":\" ws empty-calls \"}}\"");
+        }
+
+        if (allowToolCalls)
+        {
+            var rule = $"{rulePrefix}tool-calls-envelope";
+            alternatives.Add(rule);
+            grammar.AppendLine(
+                $"{rule} ::= \"{{\" ws \"\\\"mode\\\"\" ws \":\" ws \"\\\"tool_calls\\\"\" ws \",\" ws \"\\\"text\\\"\" ws \":\" ws string ws \",\" ws \"\\\"calls\\\"\" ws \":\" ws calls-arr \"}}\"");
+        }
+
+        if (allowRefusal)
+        {
+            var rule = $"{rulePrefix}refusal-envelope";
+            alternatives.Add(rule);
+            grammar.AppendLine(
+                $"{rule} ::= \"{{\" ws \"\\\"mode\\\"\" ws \":\" ws \"\\\"refusal\\\"\" ws \",\" ws \"\\\"text\\\"\" ws \":\" ws string ws \",\" ws \"\\\"calls\\\"\" ws \":\" ws empty-calls \"}}\"");
+        }
     }
 
     private static CallGrammarRules BuildCallRules(
         ToolChoice choice,
         IReadOnlyList<ToolDefinition> tools,
         bool strict,
-        string argumentProperty)
+        string argumentNameRule)
     {
         if (choice.Mode == ToolChoiceMode.None)
             return new CallGrammarRules("call-obj", string.Empty);
@@ -272,7 +306,7 @@ public static class LlamaSharpToolGrammar
         if (fragments.Count == 0)
         {
             sb.AppendLine(
-                $"call-obj ::= \"{{\" ws \"\\\"id\\\"\" ws \":\" ws string ws \",\" ws \"\\\"name\\\"\" ws \":\" ws {BuildNameTerminal(choice)} ws \",\" ws \"\\\"{argumentProperty}\\\"\" ws \":\" ws obj \"}}\"");
+                $"call-obj ::= \"{{\" ws \"\\\"id\\\"\" ws \":\" ws string ws \",\" ws \"\\\"name\\\"\" ws \":\" ws {BuildNameTerminal(choice)} ws \",\" ws {argumentNameRule} ws \":\" ws obj \"}}\"");
         }
         else
         {
@@ -286,7 +320,7 @@ public static class LlamaSharpToolGrammar
                     ? BuildNameTerminal(choice)
                     : BuildJsonStringTerminal(name);
                 sb.AppendLine(
-                    $"call-obj-{i} ::= \"{{\" ws \"\\\"id\\\"\" ws \":\" ws string ws \",\" ws \"\\\"name\\\"\" ws \":\" ws {nameTerminal} ws \",\" ws \"\\\"{argumentProperty}\\\"\" ws \":\" ws {argsRule} \"}}\"");
+                    $"call-obj-{i} ::= \"{{\" ws \"\\\"id\\\"\" ws \":\" ws string ws \",\" ws \"\\\"name\\\"\" ws \":\" ws {nameTerminal} ws \",\" ws {argumentNameRule} ws \":\" ws {argsRule} \"}}\"");
             }
         }
 

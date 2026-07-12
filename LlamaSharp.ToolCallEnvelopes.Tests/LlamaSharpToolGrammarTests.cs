@@ -143,7 +143,9 @@ public sealed class LlamaSharpToolGrammarTests
                 StrictTools = true,
             });
 
-        grammar.Should().Contain("\"\\\"arguments\\\"\" ws \":\" ws object");
+        grammar.Should().Contain("argument-name ws \":\" ws object");
+        grammar.Should().Contain(
+            "argument-name ::= \"\\\"arguments\\\"\" | \"\\\"args\\\"\"");
         grammar.Should().Contain("object ::= obj");
     }
 
@@ -218,7 +220,7 @@ public sealed class LlamaSharpToolGrammarTests
             });
 
         grammar.Split('\n')[0].Should().Be(envelopeMode == ToolEnvelopeMode.Inferred
-            ? "root ::= inferred-message-envelope"
+            ? "root ::= inferred-message-envelope | declared-message-envelope"
             : "root ::= message-envelope");
         grammar.Should().NotContain("tool-calls-envelope");
     }
@@ -280,7 +282,7 @@ public sealed class LlamaSharpToolGrammarTests
             });
 
         grammar.Split('\n')[0].Should().Be(envelopeMode == ToolEnvelopeMode.Inferred
-            ? "root ::= inferred-message-envelope"
+            ? "root ::= inferred-message-envelope | declared-message-envelope"
             : "root ::= message-envelope");
         grammar.Should().NotContain("tool-calls-envelope");
     }
@@ -342,6 +344,80 @@ public sealed class LlamaSharpToolGrammarTests
         grammar.Should().Contain("\"\\\"first\\\"\"");
         grammar.Should().Contain("\"\\\"second\\\"\"");
         grammar.Should().NotContain("\"\\\"name\\\"\" ws \":\" ws string");
+    }
+
+    [Test]
+    public void BuildComplete_InferredGrammarAdmitsNoOptionsPromptContract()
+    {
+        var tools = new[]
+        {
+            Tool("lookup", """{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}""")
+        };
+        var prompt = LlamaSharpToolPromptBuilder.Build(
+            "Use the lookup tool.",
+            [ToolAwareMessage.User("Find Zagreb.")],
+            tools,
+            strictTools: true);
+        var grammar = LlamaSharpToolGrammar.BuildCompleteEnvelopeGrammar(
+            tools,
+            new ToolEnvelopeGrammarOptions
+            {
+                ToolChoice = ToolChoice.Required,
+                EnvelopeMode = ToolEnvelopeMode.Inferred,
+                StrictTools = true,
+            });
+
+        prompt.Messages[0].Content.Should().Contain("{\"mode\":\"tool_calls\"");
+        grammar.Split('\n')[0].Should().Be(
+            "root ::= inferred-tool-calls-envelope | declared-tool-calls-envelope");
+        grammar.Should().Contain(
+            "declared-tool-calls-envelope ::= \"{\" ws \"\\\"mode\\\"\"");
+        grammar.Should().Contain(
+            "argument-name ::= \"\\\"arguments\\\"\" | \"\\\"args\\\"\"");
+
+        var parsed = LlamaSharpToolEnvelopeParser.Parse(
+            """{"mode":"tool_calls","text":"","calls":[{"id":"call_1","name":"lookup","args":{"query":"Zagreb"}}]}""");
+        parsed.ToolCalls.Should().ContainSingle().Which.Name.Should().Be("lookup");
+    }
+
+    [Test]
+    public void BuildComplete_InferredAutoIncludesBothShapesForEveryAllowedResult()
+    {
+        var grammar = LlamaSharpToolGrammar.BuildCompleteEnvelopeGrammar(
+            [Tool(
+                "lookup",
+                """{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}""")],
+            new ToolEnvelopeGrammarOptions
+            {
+                ToolChoice = ToolChoice.Auto,
+                EnvelopeMode = ToolEnvelopeMode.Inferred,
+                StrictTools = true,
+                AllowRefusal = true,
+            });
+
+        grammar.Split('\n')[0].Should().Be(
+            "root ::= inferred-message-envelope | inferred-tool-calls-envelope | " +
+            "inferred-refusal-envelope | declared-message-envelope | " +
+            "declared-tool-calls-envelope | declared-refusal-envelope");
+        Regex.Matches(grammar, @"(?m)^t0-top-obj ::=").Count.Should().Be(1);
+    }
+
+    [Test]
+    public void BuildComplete_StrictDeclaredRemainsSingleShape()
+    {
+        var grammar = LlamaSharpToolGrammar.BuildCompleteEnvelopeGrammar(
+            [Tool("lookup", """{"type":"object"}""")],
+            new ToolEnvelopeGrammarOptions
+            {
+                ToolChoice = ToolChoice.Required,
+                EnvelopeMode = ToolEnvelopeMode.StrictDeclared,
+                StrictTools = true,
+            });
+
+        grammar.Split('\n')[0].Should().Be("root ::= tool-calls-envelope");
+        grammar.Should().NotContain("inferred-tool-calls-envelope");
+        grammar.Should().NotContain("declared-tool-calls-envelope");
+        grammar.Should().NotContain("argument-name");
     }
 
     [Test]

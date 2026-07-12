@@ -6,13 +6,14 @@ namespace LlamaSharp.ToolCallEnvelopes;
 public enum ToolEnvelopeMode
 {
     /// <summary>
-    /// Classify from the payload shape. Legacy <c>mode</c>/<c>calls</c>
-    /// envelopes remain accepted.
+    /// Classify from the payload shape. Inferred prompts prefer the minimal
+    /// payload, while inferred grammars and parsers also accept declared
+    /// <c>mode</c>/<c>calls</c> envelopes.
     /// </summary>
     Inferred = 0,
 
     /// <summary>
-    /// Require the legacy explicit <c>mode</c>, <c>text</c>, and
+    /// Require the declared <c>mode</c>, <c>text</c>, and
     /// <c>calls</c> fields to agree.
     /// </summary>
     StrictDeclared = 1,
@@ -46,7 +47,7 @@ public sealed record ToolEnvelopeParserOptions
     public ToolEnvelopeMode EnvelopeMode { get; init; } = ToolEnvelopeMode.Inferred;
 
     /// <summary>
-    /// Accepts the original package's <c>calls</c> property in inferred mode.
+    /// Accepts the declared <c>calls</c> property in inferred mode.
     /// </summary>
     public bool AllowLegacyCalls { get; init; } = true;
 }
@@ -78,4 +79,3 @@ public sealed record ToolPromptOptions
     public bool AllowRefusal { get; init; }
     public int ImageCount { get; init; }
 }
-
