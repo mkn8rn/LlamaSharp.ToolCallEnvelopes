@@ -77,6 +77,99 @@ var tools = new[]
 };
 ```
 
+## Choose control-flow ownership
+
+There are two valid ways to use the package. In the unmanaged style, your
+application owns the local control flow. It builds the prompt and grammar,
+starts LlamaSharp, parses the completed envelope, authorizes and dispatches
+tool calls, appends the assistant call and tool result messages, and decides
+when to run the next model turn. This is the appropriate style when the
+application needs custom turn selection, persistence, authorization, retries,
+parallel dispatch, UI state transitions, or other control-flow rules that the
+package cannot know about. The unmanaged flow uses the low-level APIs directly:
+
+```csharp
+var promptHistory = LlamaSharpToolPromptBuilder.Build(
+    systemPrompt: "Use tools when they are needed.",
+    messages: conversation,
+    tools: tools,
+    options: new ToolPromptOptions
+    {
+        ToolChoice = ToolChoice.Auto,
+        EnvelopeMode = ToolEnvelopeMode.Inferred,
+        StrictTools = true,
+    });
+
+var grammar = LlamaSharpToolGrammar.BuildCompleteEnvelopeGrammar(
+    tools,
+    new ToolEnvelopeGrammarOptions
+    {
+        ToolChoice = ToolChoice.Auto,
+        EnvelopeMode = ToolEnvelopeMode.Inferred,
+        StrictTools = true,
+    });
+
+var rawModelOutput = await RunOneLlamaSharpTurnAsync(
+    promptHistory,
+    grammar,
+    cancellationToken);
+var envelope = LlamaSharpToolEnvelopeParser.Parse(rawModelOutput);
+
+if (envelope.HasToolCalls)
+{
+    conversation.Add(ToolAwareMessage.AssistantWithToolCalls(
+        envelope.ToolCalls,
+        envelope.Content));
+
+    foreach (var call in envelope.ToolCalls)
+    {
+        var toolResult = await DispatchToolAsync(call, cancellationToken);
+        conversation.Add(ToolAwareMessage.ToolResult(call.Id, toolResult));
+    }
+}
+```
+
+`RunOneLlamaSharpTurnAsync` in this example is application code. It represents
+the host-specific LlamaSharp session, prompt rendering, sampling pipeline, and
+generated-text buffering shown in the later sections of this guide. The
+package intentionally does not provide that model-session method.
+
+The managed style delegates the repeated envelope loop to
+`LlamaSharpToolCallRunner`. The host still supplies the LlamaSharp adapter and
+the tool-dispatch callback, but the runner handles prompt construction,
+grammar construction, stream validation, final parsing, tool-result history,
+bounded repair, and the decision to continue until a final answer or refusal.
+It is a convenience orchestration layer and a practical application template,
+not an objectively best integration for every application. Use it when the
+default loop is close to what the application needs and you want to avoid
+reimplementing the ordinary tool-call turns. Use the unmanaged style when the
+application needs to own those decisions itself.
+
+The managed call site looks like this; the complete adapter implementation is
+shown below:
+
+```csharp
+var managedResult = await LlamaSharpToolCallRunner.RunAsync(
+    executor,
+    conversation,
+    tools,
+    DispatchToolAsync,
+    new LlamaSharpToolRunOptions
+    {
+        ToolChoice = ToolChoice.Auto,
+        EnvelopeMode = ToolEnvelopeMode.Inferred,
+        StreamValidation = ToolEnvelopeStreamValidation.Strict,
+        StrictTools = true,
+        RepairInvalidEnvelope = true,
+        MaxRepairAttempts = 1,
+        MaxTurns = 4,
+        SystemPrompt = "Use tools when the question requires them.",
+    },
+    cancellationToken);
+
+Console.WriteLine(managedResult.AssistantText);
+```
+
 For each model turn, build prompt history from your own conversation messages.
 Plain user messages pass through. Plain assistant messages are wrapped back into
 the envelope shape so the model sees a consistent transcript. Previous
@@ -387,10 +480,11 @@ var followUpGrammar = LlamaSharpToolGrammar.BuildCompleteEnvelopeGrammar(
     });
 ```
 
-If you want the package to own the repeated tool-call turns, use the managed
-runner. The runner still does not own a LlamaSharp session, so the host supplies
-a small adapter that renders `ToolPromptHistory`, attaches the supplied grammar
-to `InferenceParams`, and yields the model's generated fragments. For example:
+If the managed style fits your application, use the managed runner as a
+convenience layer or as a starting template. The runner still does not own a
+LlamaSharp session, so the host supplies a small adapter that renders
+`ToolPromptHistory`, attaches the supplied grammar to `InferenceParams`, and
+yields the model's generated fragments. For example:
 
 ```csharp
 using LLama;
@@ -503,6 +597,15 @@ await foreach (var update in LlamaSharpToolCallRunner.RunStreamingAsync(
     }
 }
 ```
+
+The managed runner does not remove the unmanaged option. Both paths use the
+same `ToolDefinition`, prompt, grammar, envelope, and tool-dispatch contracts.
+The difference is only who owns the repeated-turn control flow. The demo's
+`RunUnmanagedToolCallDemoAsync` method shows the locally coded path, while
+`RunManagedAnswerOrToolDemoAsync` shows the runner path against the same real local
+LlamaSharp model. Those methods are intentionally kept side by side so an
+application developer can copy the runner adapter as a template or replace it
+with the lower-level loop when more control is required.
 
 Refusal output is opt-in. Enable it in both prompt formatting and grammar
 construction, and use a tool choice that still permits message-mode output,

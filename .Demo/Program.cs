@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Net.Http.Headers;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using LLama;
@@ -51,7 +52,8 @@ internal static class Program
                 cts.Token,
                 null);
 
-            await RunToolCallDemoAsync(weights, modelParams, tools, cts.Token);
+            await RunUnmanagedToolCallDemoAsync(weights, modelParams, tools, cts.Token);
+            await RunManagedAnswerOrToolDemoAsync(weights, modelParams, tools, cts.Token);
             await RunRefusalDemoAsync(weights, modelParams, tools, cts.Token);
             return 0;
         }
@@ -67,14 +69,16 @@ internal static class Program
         }
     }
 
-    private static async Task RunToolCallDemoAsync(
+    private static async Task RunUnmanagedToolCallDemoAsync(
         LLamaWeights weights,
         ModelParams modelParams,
         IReadOnlyList<ToolDefinition> tools,
         CancellationToken cancellationToken)
     {
         Console.WriteLine();
-        Console.WriteLine("=== Tool-call acceptance demo ===");
+        Console.WriteLine("=== Unmanaged tool-call acceptance demo ===");
+        Console.WriteLine(
+            "Locally coded flow: build, infer, parse, dispatch, append history, repeat.");
 
         var conversation = new List<ToolAwareMessage>
         {
@@ -125,6 +129,69 @@ internal static class Program
 
         Console.WriteLine("Final answer turn:");
         RenderParsedResult(finalTurn);
+    }
+
+    private static async Task RunManagedAnswerOrToolDemoAsync(
+        LLamaWeights weights,
+        ModelParams modelParams,
+        IReadOnlyList<ToolDefinition> tools,
+        CancellationToken cancellationToken)
+    {
+        Console.WriteLine();
+        Console.WriteLine("=== Managed answer-or-tool demo ===");
+        Console.WriteLine(
+            "Runner flow: the adapter supplies model fragments and the runner manages the turns.");
+
+        var conversation = new List<ToolAwareMessage>
+        {
+            ToolAwareMessage.User(
+                "Use the get_weather tool now for Zagreb and report the result afterward. " +
+                "Do not answer from memory.")
+        };
+
+        var executor = new LlamaSharpExecutorAdapter(weights, modelParams);
+        var result = await LlamaSharpToolCallRunner.RunAsync(
+            executor,
+            conversation,
+            tools,
+            DispatchWeatherToolAsync,
+            new LlamaSharpToolRunOptions
+            {
+                // Auto is the normal answer-or-tool policy. The prompt asks this
+                // particular example to use the tool without hardwiring the grammar
+                // to a tool call, so the managed path also demonstrates final text.
+                ToolChoice = ToolChoice.Auto,
+                EnvelopeMode = ToolEnvelopeMode.Inferred,
+                StreamValidation = ToolEnvelopeStreamValidation.Strict,
+                ParallelToolCalls = false,
+                StrictTools = true,
+                AllowRefusal = false,
+                MaxTurns = 3,
+                SystemPrompt =
+                    "You are a local demo assistant. For this weather request, " +
+                    "call get_weather, then answer from the returned tool result."
+            },
+            cancellationToken);
+
+        if (result.Metadata.ToolCalls.Count == 0)
+        {
+            Console.WriteLine(
+                "Managed runner selected a direct answer; ToolChoice.Auto permits " +
+                "either text or tool calls.");
+        }
+        else
+        {
+            Console.WriteLine(
+                $"Managed tool calls executed: {result.Metadata.ToolCalls.Count}");
+        }
+        if (result.AssistantText is { } assistantText)
+        {
+            Console.WriteLine($"Managed final answer: {assistantText}");
+        }
+        else if (result.Refusal is { } refusal)
+        {
+            Console.WriteLine($"Managed refusal: {refusal}");
+        }
     }
 
     private static async Task RunRefusalDemoAsync(
@@ -296,6 +363,16 @@ internal static class Program
         });
     }
 
+    private static Task<string> DispatchWeatherToolAsync(
+        ToolCall call,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var result = ExecuteWeatherTool(call);
+        Console.WriteLine($"Managed tool result for {call.Id}: {result}");
+        return Task.FromResult(result);
+    }
+
     private static JsonDocument CreateWeatherSchema() =>
         JsonDocument.Parse("""
             {
@@ -406,5 +483,52 @@ internal static class Program
             downloaded / 1024.0 / 1024.0,
             totalBytes / 1024.0 / 1024.0,
             percent);
+    }
+
+    private sealed class LlamaSharpExecutorAdapter : ILlamaSharpToolExecutor
+    {
+        private readonly LLamaWeights _weights;
+        private readonly ModelParams _modelParams;
+
+        public LlamaSharpExecutorAdapter(
+            LLamaWeights weights,
+            ModelParams modelParams)
+        {
+            _weights = weights;
+            _modelParams = modelParams;
+        }
+
+        public async IAsyncEnumerable<string> InferAsync(
+            ToolPromptHistory prompt,
+            string grammar,
+            [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            using var context = _weights.CreateContext(_modelParams);
+            var executor = new InteractiveExecutor(context);
+            var inferenceParams = new InferenceParams
+            {
+                MaxTokens = 256,
+                SamplingPipeline = new DefaultSamplingPipeline
+                {
+                    Grammar = new Grammar(grammar, "root"),
+                    Temperature = 0.1f,
+                    TopP = 0.9f,
+                    Seed = 42,
+                },
+            };
+
+            Console.WriteLine("Model output:");
+            await foreach (var text in executor.InferAsync(
+                               RenderPrompt(prompt),
+                               inferenceParams,
+                               cancellationToken))
+            {
+                Console.Write(text);
+                yield return text;
+            }
+
+            Console.WriteLine();
+            Console.WriteLine();
+        }
     }
 }
