@@ -15,32 +15,22 @@ internal static class Program
     private const string ModelUrl =
         "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_0.gguf";
     private const long ExpectedModelBytes = 428_730_208;
-    private const string WeatherToolName = "get_weather";
 
     public static async Task<int> Main()
     {
-        using var cts = new CancellationTokenSource();
+        using var cancellation = new CancellationTokenSource();
         Console.CancelKeyPress += (_, eventArgs) =>
         {
             eventArgs.Cancel = true;
-            cts.Cancel();
+            cancellation.Cancel();
         };
 
         try
         {
-            var modelPath = await EnsureModelAsync(cts.Token);
-            using var schemaDocument = CreateWeatherSchema();
-            var tools = new[]
+            var modelPath = await EnsureModelAsync(cancellation.Token);
+            var modelParameters = new ModelParams(modelPath)
             {
-                new ToolDefinition(
-                    WeatherToolName,
-                    "Gets the current weather for a city.",
-                    schemaDocument.RootElement.Clone())
-            };
-
-            var modelParams = new ModelParams(modelPath)
-            {
-                ContextSize = 2048,
+                ContextSize = 2_048,
                 BatchSize = 128,
                 GpuLayerCount = 0,
                 Threads = Math.Max(1, Environment.ProcessorCount / 2),
@@ -48,13 +38,15 @@ internal static class Program
 
             Console.WriteLine("Loading model...");
             using var weights = await LLamaWeights.LoadFromFileAsync(
-                modelParams,
-                cts.Token,
+                modelParameters,
+                cancellation.Token,
                 null);
 
-            await RunUnmanagedToolCallDemoAsync(weights, modelParams, tools, cts.Token);
-            await RunManagedAnswerOrToolDemoAsync(weights, modelParams, tools, cts.Token);
-            await RunRefusalDemoAsync(weights, modelParams, tools, cts.Token);
+            var plan = ToolEnvelopePlan.Compile([CreateWeatherTool()]);
+            var executor = new LlamaSharpExecutor(weights, modelParameters);
+
+            await RunManagedAsync(executor, plan, cancellation.Token);
+            await RunManualAsync(executor, plan, cancellation.Token);
             return 0;
         }
         catch (OperationCanceledException)
@@ -62,324 +54,172 @@ internal static class Program
             Console.Error.WriteLine("Demo canceled.");
             return 2;
         }
-        catch (Exception ex)
+        catch (Exception exception)
         {
-            Console.Error.WriteLine(ex);
+            Console.Error.WriteLine(exception);
             return 1;
         }
     }
 
-    private static async Task RunUnmanagedToolCallDemoAsync(
-        LLamaWeights weights,
-        ModelParams modelParams,
-        IReadOnlyList<ToolDefinition> tools,
+    private static async Task RunManagedAsync(
+        ILlamaSharpToolExecutor executor,
+        ToolEnvelopePlan plan,
         CancellationToken cancellationToken)
     {
         Console.WriteLine();
-        Console.WriteLine("=== Unmanaged tool-call acceptance demo ===");
-        Console.WriteLine(
-            "Locally coded flow: build, infer, parse, dispatch, append history, repeat.");
+        Console.WriteLine("=== Managed control flow ===");
 
-        var conversation = new List<ToolAwareMessage>
-        {
-            ToolAwareMessage.User(
-                "What is the current weather in Zagreb? Use metric units and call the weather tool.")
-        };
-
-        var firstTurn = await RunEnvelopeTurnAsync(
-            weights,
-            modelParams,
-            "You are a local demo assistant. Call the weather tool when the user asks for weather.",
-            conversation,
-            tools,
-            // This demo uses ForFunction to force the tool-call path every time.
-            // Grammar forcing is only useful when this turn must call a tool.
-            // In a normal assistant turn where a plain text answer is also valid,
-            // use ToolChoice.Auto so the model may choose the inferred text envelope.
-            ToolChoice.ForFunction(WeatherToolName),
-            strictTools: true,
-            allowRefusal: false,
-            cancellationToken);
-
-        RenderParsedResult(firstTurn);
-        if (!firstTurn.HasToolCalls)
-            throw new InvalidOperationException("The forced tool-call scenario did not produce a tool call.");
-
-        conversation.Add(ToolAwareMessage.AssistantWithToolCalls(
-            firstTurn.ToolCalls,
-            firstTurn.Content));
-
-        foreach (var call in firstTurn.ToolCalls)
-        {
-            var toolResult = ExecuteWeatherTool(call);
-            Console.WriteLine($"Tool result for {call.Id}: {toolResult}");
-            conversation.Add(ToolAwareMessage.ToolResult(call.Id, toolResult));
-        }
-
-        var finalTurn = await RunEnvelopeTurnAsync(
-            weights,
-            modelParams,
-            "You are a local demo assistant. Answer from the supplied tool result.",
-            conversation,
-            tools,
-            ToolChoice.None,
-            strictTools: false,
-            allowRefusal: false,
-            cancellationToken);
-
-        Console.WriteLine("Final answer turn:");
-        RenderParsedResult(finalTurn);
-    }
-
-    private static async Task RunManagedAnswerOrToolDemoAsync(
-        LLamaWeights weights,
-        ModelParams modelParams,
-        IReadOnlyList<ToolDefinition> tools,
-        CancellationToken cancellationToken)
-    {
-        Console.WriteLine();
-        Console.WriteLine("=== Managed answer-or-tool demo ===");
-        Console.WriteLine(
-            "Runner flow: the adapter supplies model fragments and the runner manages the turns.");
-
-        var conversation = new List<ToolAwareMessage>
-        {
-            ToolAwareMessage.User(
-                "Use the get_weather tool now for Zagreb and report the result afterward. " +
-                "Do not answer from memory.")
-        };
-
-        var executor = new LlamaSharpExecutorAdapter(weights, modelParams);
-        var result = await LlamaSharpToolCallRunner.RunAsync(
+        var result = await ToolEnvelopeRunner.RunAsync(
             executor,
-            conversation,
-            tools,
-            DispatchWeatherToolAsync,
-            new LlamaSharpToolRunOptions
+            plan,
+            "Use the weather tool for current conditions, then answer from its result.",
+            [ToolMessage.User("What is the weather in Zagreb?")],
+            DispatchWeatherAsync,
+            new ToolRunOptions
             {
-                // Auto is the normal answer-or-tool policy. The prompt asks this
-                // particular example to use the tool without hardwiring the grammar
-                // to a tool call, so the managed path also demonstrates final text.
-                ToolChoice = ToolChoice.Auto,
-                EnvelopeMode = ToolEnvelopeMode.Inferred,
-                StreamValidation = ToolEnvelopeStreamValidation.Strict,
-                ParallelToolCalls = false,
-                StrictTools = true,
-                AllowRefusal = false,
-                MaxTurns = 3,
-                SystemPrompt =
-                    "You are a local demo assistant. For this weather request, " +
-                    "call get_weather, then answer from the returned tool result."
+                InitialChoice = ToolChoice.Required,
+                FollowUpChoice = ToolChoice.None,
+                MaxModelTurns = 2,
             },
             cancellationToken);
 
-        if (result.Metadata.ToolCalls.Count == 0)
+        switch (result)
         {
-            Console.WriteLine(
-                "Managed runner selected a direct answer; ToolChoice.Auto permits " +
-                "either text or tool calls.");
-        }
-        else
-        {
-            Console.WriteLine(
-                $"Managed tool calls executed: {result.Metadata.ToolCalls.Count}");
-        }
-        if (result.AssistantText is { } assistantText)
-        {
-            Console.WriteLine($"Managed final answer: {assistantText}");
-        }
-        else if (result.Refusal is { } refusal)
-        {
-            Console.WriteLine($"Managed refusal: {refusal}");
+            case ToolRunResult.Completed completed:
+                PrintOutcome(completed.Outcome);
+                Console.WriteLine($"Executed {completed.Executions.Count} tool call(s).");
+                break;
+
+            case ToolRunResult.Failed failed:
+                Console.WriteLine(
+                    $"Managed run failed: {failed.Failure.Code}: {failed.Failure.Message}");
+                break;
         }
     }
 
-    private static async Task RunRefusalDemoAsync(
-        LLamaWeights weights,
-        ModelParams modelParams,
-        IReadOnlyList<ToolDefinition> tools,
+    private static async Task RunManualAsync(
+        ILlamaSharpToolExecutor executor,
+        ToolEnvelopePlan plan,
         CancellationToken cancellationToken)
     {
         Console.WriteLine();
-        Console.WriteLine("=== Refusal-capable demo ===");
+        Console.WriteLine("=== Manual control flow ===");
 
-        var messages = new List<ToolAwareMessage>
+        const string policy =
+            "Use the weather tool for current conditions, then answer from its result.";
+        var conversation = new List<ToolMessage>
         {
-            ToolAwareMessage.User(
-                "Run the refusal-envelope demo. Decline with a short reason.")
+            ToolMessage.User("What is the weather in Split?"),
         };
 
-        var result = await RunEnvelopeTurnAsync(
-            weights,
-            modelParams,
-            "You are a local demo assistant. This turn is a refusal-envelope demo; use refusal mode and do not answer in message mode.",
-            messages,
-            tools,
-            ToolChoice.None,
-            strictTools: false,
-            allowRefusal: true,
-            cancellationToken,
-            envelopeMode: ToolEnvelopeMode.StrictDeclared);
+        var toolTurn = plan.CreateTurn(policy, conversation, ToolChoice.Required);
+        var toolOutcome = await InferAndParseAsync(executor, toolTurn, cancellationToken);
+        var request = toolOutcome as ToolEnvelopeOutcome.ToolRequest
+            ?? throw new InvalidOperationException(
+                $"The manual demo created a ToolChoice.Required turn, but the model returned "
+                + $"'{toolOutcome.GetType().Name}' instead of ToolRequest. Ensure the executor "
+                + "attaches this turn's Grammar with root rule 'root'; then reject and retry the "
+                + "response, or repair the custom inference flow before dispatching anything.");
 
-        RenderParsedResult(result);
-    }
-
-    private static async Task<ToolEnvelopeResult> RunEnvelopeTurnAsync(
-        LLamaWeights weights,
-        ModelParams modelParams,
-        string systemPrompt,
-        IReadOnlyList<ToolAwareMessage> messages,
-        IReadOnlyList<ToolDefinition> tools,
-        ToolChoice toolChoice,
-        bool strictTools,
-        bool allowRefusal,
-        CancellationToken cancellationToken,
-        ToolEnvelopeMode envelopeMode = ToolEnvelopeMode.Inferred)
-    {
-        var promptHistory = LlamaSharpToolPromptBuilder.Build(
-            systemPrompt,
-            messages,
-            tools,
-            new ToolPromptOptions
-            {
-                ToolChoice = toolChoice,
-                EnvelopeMode = envelopeMode,
-                StrictTools = strictTools,
-                AllowRefusal = allowRefusal,
-            });
-
-        var grammar = LlamaSharpToolGrammar.BuildCompleteEnvelopeGrammar(
-            tools,
-            new ToolEnvelopeGrammarOptions
-            {
-                ToolChoice = toolChoice,
-                EnvelopeMode = envelopeMode,
-                ParallelToolCalls = false,
-                StrictTools = strictTools,
-                AllowRefusal = allowRefusal,
-            });
-
-        using var context = weights.CreateContext(modelParams);
-        var executor = new InteractiveExecutor(context);
-        var prompt = RenderPrompt(promptHistory);
-        var output = new StringBuilder();
-
-        var inferenceParams = new InferenceParams
+        conversation.Add(ToolMessage.AssistantCalls(request.Calls));
+        foreach (var call in request.Calls)
         {
-            MaxTokens = 256,
-            SamplingPipeline = new DefaultSamplingPipeline
-            {
-                Grammar = new Grammar(grammar, "root"),
-                Temperature = 0.1f,
-                TopP = 0.9f,
-                Seed = 42,
-            },
-        };
-
-        await foreach (var text in executor.InferAsync(prompt, inferenceParams, cancellationToken))
-        {
-            Console.Write(text);
-            output.Append(text);
+            var result = await DispatchWeatherAsync(call, cancellationToken);
+            conversation.Add(ToolMessage.ToolResult(call, result));
         }
 
-        Console.WriteLine();
-        Console.WriteLine();
-
-        return LlamaSharpToolEnvelopeParser.Parse(
-            output.ToString().Trim(),
-            new ToolEnvelopeParserOptions
-            {
-                EnvelopeMode = envelopeMode,
-            });
+        var answerTurn = plan.CreateTurn(policy, conversation, ToolChoice.None);
+        var finalOutcome = await InferAndParseAsync(executor, answerTurn, cancellationToken);
+        PrintOutcome(finalOutcome);
     }
 
-    private static string RenderPrompt(ToolPromptHistory promptHistory)
+    private static async Task<ToolEnvelopeOutcome> InferAndParseAsync(
+        ILlamaSharpToolExecutor executor,
+        ToolEnvelopeTurn turn,
+        CancellationToken cancellationToken)
     {
-        var sb = new StringBuilder();
-        foreach (var message in promptHistory.Messages)
+        var reader = turn.CreateStreamReader();
+        await foreach (var fragment in executor.InferAsync(turn, cancellationToken))
+            reader.Feed(fragment);
+        return reader.Complete();
+    }
+
+    private static ValueTask<string> DispatchWeatherAsync(
+        ToolCall call,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!string.Equals(call.Name, "get_weather", StringComparison.Ordinal))
         {
-            sb.Append("### ");
-            sb.AppendLine(message.Role switch
-            {
-                ToolPromptRole.System => "System",
-                ToolPromptRole.User => "User",
-                ToolPromptRole.Assistant => "Assistant",
-                _ => throw new InvalidOperationException(
-                    $"Unsupported prompt role '{message.Role}'.")
-            });
-            sb.AppendLine(message.Content);
-            sb.AppendLine();
+            throw new InvalidOperationException(
+                $"The demo dispatcher received validated call {call.Index} for tool "
+                + $"'{call.Name}', but it implements only 'get_weather'. Add an explicit "
+                + "dispatcher route for every tool in the compiled plan, or reject and repair "
+                + "the call in manual control flow before performing a side effect.");
         }
 
-        sb.AppendLine("### Assistant");
-        return sb.ToString();
-    }
-
-    private static void RenderParsedResult(ToolEnvelopeResult result)
-    {
-        switch (result.Mode)
-        {
-            case LlamaSharpToolEnvelopeParser.ToolCallsMode:
-                foreach (var call in result.ToolCalls)
-                {
-                    Console.WriteLine(
-                        FormattableString.Invariant(
-                            $"Parsed tool call: id={call.Id}, name={call.Name}, args={call.ArgumentsJson}"));
-                }
-                break;
-
-            case LlamaSharpToolEnvelopeParser.RefusalMode:
-                Console.WriteLine($"Parsed refusal: {result.Refusal}");
-                break;
-
-            case LlamaSharpToolEnvelopeParser.MessageMode:
-                Console.WriteLine($"Parsed message: {result.Content}");
-                break;
-
-            default:
-                throw new InvalidOperationException($"Unexpected envelope mode '{result.Mode}'.");
-        }
-    }
-
-    private static string ExecuteWeatherTool(ToolCall call)
-    {
-        if (!string.Equals(call.Name, WeatherToolName, StringComparison.Ordinal))
-            throw new InvalidOperationException($"Unknown tool '{call.Name}'.");
-
-        using var argsDocument = JsonDocument.Parse(call.ArgumentsJson);
-        var root = argsDocument.RootElement;
-        var city = root.GetProperty("city").GetString();
-        var unit = root.TryGetProperty("unit", out var unitElement)
-            ? unitElement.GetString()
-            : "celsius";
-
-        return JsonSerializer.Serialize(new
+        var city = ReadRequiredStringArgument(call, "city");
+        var unit = ReadRequiredStringArgument(call, "unit");
+        return ValueTask.FromResult(JsonSerializer.Serialize(new
         {
             city,
             unit,
             condition = "sunny",
             temperature = 22,
-            source = "hardcoded demo tool",
-        });
+            source = "demo data",
+        }));
     }
 
-    private static Task<string> DispatchWeatherToolAsync(
-        ToolCall call,
-        CancellationToken cancellationToken)
+    private static string ReadRequiredStringArgument(ToolCall call, string fieldName)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        var result = ExecuteWeatherTool(call);
-        Console.WriteLine($"Managed tool result for {call.Id}: {result}");
-        return Task.FromResult(result);
+        if (call.Arguments.ValueKind == JsonValueKind.Object
+            && call.Arguments.TryGetProperty(fieldName, out var value)
+            && value.ValueKind == JsonValueKind.String
+            && value.GetString() is { } text)
+        {
+            return text;
+        }
+
+        var observed = call.Arguments.ValueKind != JsonValueKind.Object
+            ? $"an arguments value of kind {call.Arguments.ValueKind}"
+            : call.Arguments.TryGetProperty(fieldName, out var invalid)
+                ? $"field '{fieldName}' of kind {invalid.ValueKind}"
+                : $"no field named '{fieldName}'";
+        throw new InvalidOperationException(
+            $"The demo dispatcher cannot execute call {call.Index} for tool '{call.Name}' because "
+            + $"it expected required string field '{fieldName}', but received {observed}. Keep "
+            + "the dispatcher paired with the plan that validated the call, or reject, repair, "
+            + "and retry incompatible persisted input before performing a side effect.");
     }
 
-    private static JsonDocument CreateWeatherSchema() =>
-        JsonDocument.Parse("""
+    private static void PrintOutcome(ToolEnvelopeOutcome outcome)
+    {
+        switch (outcome)
+        {
+            case ToolEnvelopeOutcome.AssistantMessage message:
+                Console.WriteLine(message.Text);
+                break;
+            case ToolEnvelopeOutcome.Refusal refusal:
+                Console.WriteLine($"Refusal: {refusal.Reason}");
+                break;
+            case ToolEnvelopeOutcome.ToolRequest request:
+                Console.WriteLine($"Tool request with {request.Calls.Count} call(s).");
+                break;
+        }
+    }
+
+    private static ToolDefinition CreateWeatherTool() =>
+        ToolDefinition.Parse(
+            "get_weather",
+            "Gets the current weather for a city.",
+            """
             {
               "type": "object",
               "properties": {
                 "city": {
                   "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64,
                   "description": "City name, for example Zagreb"
                 },
                 "unit": {
@@ -403,41 +243,31 @@ internal static class Program
             return modelPath;
         }
 
-        if (modelFile.Exists)
-        {
-            Console.WriteLine(
-                FormattableString.Invariant(
-                    $"Existing model file has {modelFile.Length} bytes; expected {ExpectedModelBytes}. Re-downloading."));
-        }
-
-        Console.WriteLine($"Downloading {ModelFileName} to assembly directory...");
-        Console.WriteLine(ModelUrl);
-
-        var tempPath = modelPath + ".download";
+        Console.WriteLine($"Downloading {ModelFileName}...");
+        var temporaryPath = modelPath + ".download";
         Directory.CreateDirectory(AppContext.BaseDirectory);
-        if (File.Exists(tempPath))
-            File.Delete(tempPath);
+        if (File.Exists(temporaryPath))
+            File.Delete(temporaryPath);
 
-        using var http = new HttpClient();
-        http.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue(
-            "LlamaSharp.ToolCallEnvelopes.Demo",
-            "0.1"));
-        http.Timeout = Timeout.InfiniteTimeSpan;
-
+        using var http = new HttpClient
+        {
+            Timeout = TimeSpan.FromMinutes(15),
+        };
+        http.DefaultRequestHeaders.UserAgent.Add(
+            new ProductInfoHeaderValue("LlamaSharp.ToolCallEnvelopes.Demo", "0.2"));
         using var response = await http.GetAsync(
             ModelUrl,
             HttpCompletionOption.ResponseHeadersRead,
             cancellationToken);
         response.EnsureSuccessStatusCode();
 
-        var totalBytes = response.Content.Headers.ContentLength ?? ExpectedModelBytes;
+        var expectedDownload = response.Content.Headers.ContentLength ?? ExpectedModelBytes;
         await using var source = await response.Content.ReadAsStreamAsync(cancellationToken);
-        await using var target = File.Create(tempPath);
-
+        await using var target = File.Create(temporaryPath);
         var buffer = new byte[1024 * 1024];
-        long downloaded = 0;
         var stopwatch = Stopwatch.StartNew();
         var lastReport = TimeSpan.Zero;
+        long downloaded = 0;
 
         while (true)
         {
@@ -447,88 +277,97 @@ internal static class Program
 
             await target.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
             downloaded += read;
-
             if (stopwatch.Elapsed - lastReport >= TimeSpan.FromSeconds(2))
             {
                 lastReport = stopwatch.Elapsed;
-                Console.WriteLine(FormatProgress(downloaded, totalBytes));
+                Console.WriteLine(FormatProgress(downloaded, expectedDownload));
             }
         }
 
         await target.FlushAsync(cancellationToken);
         target.Close();
-
-        var downloadedFile = new FileInfo(tempPath);
-        if (downloadedFile.Length != ExpectedModelBytes)
+        var actualModelBytes = new FileInfo(temporaryPath).Length;
+        if (actualModelBytes != ExpectedModelBytes)
         {
             throw new InvalidOperationException(
-                FormattableString.Invariant(
-                    $"Downloaded model has {downloadedFile.Length} bytes; expected {ExpectedModelBytes}."));
+                $"The demo downloaded model file '{temporaryPath}', but its size is "
+                + $"{actualModelBytes} bytes instead of the expected {ExpectedModelBytes} bytes. "
+                + "Delete the incomplete .download file and retry with a stable connection, or "
+                + "place the exact Qwen model file at the final demo model path before running again.");
         }
 
-        File.Move(tempPath, modelPath, overwrite: true);
-        Console.WriteLine($"Downloaded model: {modelPath}");
+        File.Move(temporaryPath, modelPath, overwrite: true);
         return modelPath;
     }
 
-    private static string FormatProgress(long downloaded, long totalBytes)
-    {
-        var percent = totalBytes > 0
-            ? downloaded * 100.0 / totalBytes
-            : 0;
-
-        return string.Format(
+    private static string FormatProgress(long downloaded, long total) =>
+        string.Format(
             CultureInfo.InvariantCulture,
             "Downloaded {0:n1} MiB / {1:n1} MiB ({2:n1}%)",
             downloaded / 1024.0 / 1024.0,
-            totalBytes / 1024.0 / 1024.0,
-            percent);
-    }
+            total / 1024.0 / 1024.0,
+            total == 0 ? 0 : downloaded * 100.0 / total);
 
-    private sealed class LlamaSharpExecutorAdapter : ILlamaSharpToolExecutor
+    private sealed class LlamaSharpExecutor(
+        LLamaWeights weights,
+        ModelParams modelParameters) : ILlamaSharpToolExecutor
     {
-        private readonly LLamaWeights _weights;
-        private readonly ModelParams _modelParams;
-
-        public LlamaSharpExecutorAdapter(
-            LLamaWeights weights,
-            ModelParams modelParams)
-        {
-            _weights = weights;
-            _modelParams = modelParams;
-        }
-
         public async IAsyncEnumerable<string> InferAsync(
-            ToolPromptHistory prompt,
-            string grammar,
+            ToolEnvelopeTurn turn,
             [EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
-            using var context = _weights.CreateContext(_modelParams);
+            using var context = weights.CreateContext(modelParameters);
             var executor = new InteractiveExecutor(context);
-            var inferenceParams = new InferenceParams
+            var grammar = new Grammar(turn.Grammar, "root");
+            var inference = new InferenceParams
             {
                 MaxTokens = 256,
                 SamplingPipeline = new DefaultSamplingPipeline
                 {
-                    Grammar = new Grammar(grammar, "root"),
+                    Grammar = grammar,
                     Temperature = 0.1f,
                     TopP = 0.9f,
                     Seed = 42,
                 },
             };
 
-            Console.WriteLine("Model output:");
-            await foreach (var text in executor.InferAsync(
-                               RenderPrompt(prompt),
-                               inferenceParams,
+            await foreach (var fragment in executor.InferAsync(
+                               ApplyNativeTemplate(weights, turn.Prompt),
+                               inference,
                                cancellationToken))
             {
-                Console.Write(text);
-                yield return text;
+                Console.Write(fragment);
+                yield return fragment;
             }
 
             Console.WriteLine();
-            Console.WriteLine();
         }
+
+        private static string ApplyNativeTemplate(
+            LLamaWeights weights,
+            IReadOnlyList<ToolMessage> messages)
+        {
+            var template = new LLamaTemplate(weights, strict: true)
+            {
+                AddAssistant = true,
+            };
+            foreach (var message in messages)
+                template.Add(Role(message.Role), message.Content);
+            return Encoding.UTF8.GetString(template.Apply());
+        }
+
+        private static string Role(ToolMessageRole role) => role switch
+        {
+            ToolMessageRole.System => "system",
+            ToolMessageRole.User => "user",
+            ToolMessageRole.Assistant => "assistant",
+            ToolMessageRole.Tool => "tool",
+            _ => throw new ArgumentOutOfRangeException(
+                nameof(role),
+                role,
+                "The LlamaSharp demo adapter cannot map this ToolMessageRole to a native chat "
+                + "template role. Pass messages created by the package factories, or update the "
+                + "adapter explicitly when adding a newly supported role."),
+        };
     }
 }

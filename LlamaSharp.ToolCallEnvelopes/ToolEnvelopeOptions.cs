@@ -1,81 +1,73 @@
 namespace LlamaSharp.ToolCallEnvelopes;
 
 /// <summary>
-/// Selects how a completed envelope is classified.
+/// Structural and memory limits used while compiling and running a plan.
 /// </summary>
-public enum ToolEnvelopeMode
+public sealed record ToolEnvelopeLimits
 {
-    /// <summary>
-    /// Classify from the payload shape. Inferred prompts prefer the minimal
-    /// payload, while inferred grammars and parsers also accept declared
-    /// <c>mode</c>/<c>calls</c> envelopes.
-    /// </summary>
-    Inferred = 0,
+    /// <summary>Defaults intended for local models and constrained hosts.</summary>
+    public static ToolEnvelopeLimits Constrained { get; } = new();
 
-    /// <summary>
-    /// Require the declared <c>mode</c>, <c>text</c>, and
-    /// <c>calls</c> fields to agree.
-    /// </summary>
-    StrictDeclared = 1,
+    /// <summary>Maximum tools in one compiled catalog.</summary>
+    public int MaxTools { get; init; } = 16;
+    /// <summary>Maximum UTF-16 characters in the generated semantic catalog.</summary>
+    public int MaxCatalogPromptCharacters { get; init; } = 4_096;
+    /// <summary>Maximum UTF-16 characters in one tool description.</summary>
+    public int MaxToolDescriptionCharacters { get; init; } = 512;
+    /// <summary>Maximum UTF-16 characters in one parameter description.</summary>
+    public int MaxParameterDescriptionCharacters { get; init; } = 512;
+    /// <summary>Maximum serialized UTF-16 characters in one tool schema.</summary>
+    public int MaxToolSchemaCharacters { get; init; } = 32_768;
+    /// <summary>Maximum nested instance depth represented by one schema.</summary>
+    public int MaxSchemaDepth { get; init; } = 8;
+    /// <summary>Maximum declared properties in any object schema.</summary>
+    public int MaxPropertiesPerObject { get; init; } = 32;
+    /// <summary>Maximum values in any enum constraint.</summary>
+    public int MaxEnumValues { get; init; } = 64;
+    /// <summary>Maximum combined serialized UTF-16 characters in one enum.</summary>
+    public int MaxEnumTextCharacters { get; init; } = 4_096;
+    /// <summary>Maximum compiled schema nodes for one tool.</summary>
+    public int MaxSchemaRules { get; init; } = 256;
+    /// <summary>Maximum accumulated UTF-16 characters in one model envelope.</summary>
+    public int MaxEnvelopeCharacters { get; init; } = 65_536;
+    /// <summary>Maximum Unicode scalar values in final assistant text.</summary>
+    public int MaxFinalTextCharacters { get; init; } = 8_192;
+    /// <summary>Maximum Unicode scalar values in a refusal reason.</summary>
+    public int MaxRefusalCharacters { get; init; } = 1_024;
+    /// <summary>Default and absolute Unicode-scalar limit for generated schema strings.</summary>
+    public int MaxGeneratedStringCharacters { get; init; } = 2_048;
+    /// <summary>Default and absolute item limit for generated schema arrays.</summary>
+    public int MaxGeneratedArrayItems { get; init; } = 32;
+    /// <summary>Maximum JSON characters in a generated schema number.</summary>
+    public int MaxGeneratedNumberCharacters { get; init; } = 128;
+    /// <summary>Maximum UTF-16 characters in one tool result added to history.</summary>
+    public int MaxToolResultCharacters { get; init; } = 32_768;
+    /// <summary>Maximum escaped UTF-16 characters retained in a diagnostic payload preview.</summary>
+    public int MaxDiagnosticPreviewCharacters { get; init; } = 512;
 }
 
-/// <summary>
-/// Controls whether the streaming walker checks semantic contradictions before
-/// the final JSON document is complete.
-/// </summary>
-public enum ToolEnvelopeStreamValidation
+/// <summary>Options that remain stable for the lifetime of a compiled plan.</summary>
+public sealed record ToolEnvelopePlanOptions
 {
-    Off = 0,
-    Strict = 1,
-}
-
-/// <summary>
-/// Normalized result kinds returned by the envelope parser.
-/// </summary>
-public enum ToolEnvelopeResultMode
-{
-    Message = 0,
-    ToolCalls,
-    Refusal,
-}
-
-/// <summary>
-/// Options for completed-envelope parsing.
-/// </summary>
-public sealed record ToolEnvelopeParserOptions
-{
-    public ToolEnvelopeMode EnvelopeMode { get; init; } = ToolEnvelopeMode.Inferred;
-
-    /// <summary>
-    /// Accepts the declared <c>calls</c> property in inferred mode.
-    /// </summary>
-    public bool AllowLegacyCalls { get; init; } = true;
-}
-
-/// <summary>
-/// A non-throwing parse result for hosts that need to own retry and logging
-/// policy.
-/// </summary>
-public sealed record ToolEnvelopeParseResult(
-    bool Success,
-    ToolEnvelopeResult? Value,
-    LlamaSharpToolEnvelopeException? Error)
-{
-    public static ToolEnvelopeParseResult FromValue(ToolEnvelopeResult value) =>
-        new(true, value, null);
-
-    public static ToolEnvelopeParseResult FromError(LlamaSharpToolEnvelopeException error) =>
-        new(false, null, error);
-}
-
-/// <summary>
-/// Prompt options shared by the prompt builder and managed runner.
-/// </summary>
-public sealed record ToolPromptOptions
-{
-    public ToolChoice ToolChoice { get; init; } = ToolChoice.Auto;
-    public ToolEnvelopeMode EnvelopeMode { get; init; } = ToolEnvelopeMode.Inferred;
-    public bool StrictTools { get; init; }
+    /// <summary>Whether a turn may return a refusal.</summary>
     public bool AllowRefusal { get; init; }
-    public int ImageCount { get; init; }
+
+    /// <summary>Maximum tool requests in one model envelope.</summary>
+    public int MaxCallsPerTurn { get; init; } = 1;
+
+    /// <summary>Structural and memory limits for the plan.</summary>
+    public ToolEnvelopeLimits Limits { get; init; } = ToolEnvelopeLimits.Constrained;
 }
+
+/// <summary>Stable costs measured while compiling a plan.</summary>
+public sealed record ToolEnvelopePlanMetrics(
+    string CatalogFingerprint,
+    int ToolCount,
+    int CatalogPromptCharacters,
+    int SchemaRuleCount,
+    int MaximumSchemaDepth);
+
+/// <summary>Costs measured for one concrete turn.</summary>
+public sealed record ToolEnvelopeTurnMetrics(
+    int PromptCharacters,
+    int GrammarCharacters);
