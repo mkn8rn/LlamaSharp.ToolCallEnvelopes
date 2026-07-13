@@ -34,11 +34,23 @@ function Get-FileBranchRate {
 
     $normalizedFile = $File.Replace('\', '/')
     $classes = @($coverage.coverage.packages.package.classes.class | Where-Object {
-        $_.filename.Replace('\', '/') -eq $normalizedFile
+        $sourcePath = $_.filename.Replace('\', '/')
+        $sourcePath -eq $normalizedFile -or $sourcePath.EndsWith(
+            "/$normalizedFile",
+            [System.StringComparison]::Ordinal)
     })
     if ($classes.Count -eq 0) {
         throw "Coverage report '$ReportPath' contains no source entry for '$File'. Ensure the " +
             "package project was instrumented and the source path has not changed."
+    }
+
+    $matchedPaths = @($classes | ForEach-Object {
+        $_.filename.Replace('\', '/')
+    } | Sort-Object -Unique)
+    if ($matchedPaths.Count -ne 1) {
+        throw "Coverage report '$ReportPath' contains multiple source entries that could match " +
+            "'$File': $($matchedPaths -join ', '). Keep source paths unique so the release gate " +
+            'cannot combine coverage from unrelated files.'
     }
 
     $lines = @($classes | ForEach-Object { $_.lines.line })

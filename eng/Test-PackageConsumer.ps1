@@ -3,7 +3,9 @@ param(
     [Parameter(Mandatory)]
     [string] $PackageDirectory,
 
-    [string] $WorkingDirectory = 'artifacts/package-consumer'
+    [string] $WorkingDirectory = 'artifacts/package-consumer',
+
+    [string] $ExpectedVersion = '0.2.0'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -45,10 +47,14 @@ if ($LASTEXITCODE -ne 0) {
         "'$sourcePath'. Inspect the package identity, version, and NuGet source before publishing."
 }
 
-$packageName = 'Supprocom.LlamaSharp.ToolCallEnvelopes.0.2.0.nupkg'
+$packageId = 'Supprocom.LlamaSharp.ToolCallEnvelopes'
+$packageName = "$packageId.$ExpectedVersion.nupkg"
 $sourcePackage = Join-Path $sourcePath $packageName
-$restoredPackage = Join-Path $packagesPath (
-    'supprocom.llamasharp.toolcallenvelopes\0.2.0\' + $packageName.ToLowerInvariant())
+$restoredPackage = [System.IO.Path]::Combine(
+    $packagesPath,
+    $packageId.ToLowerInvariant(),
+    $ExpectedVersion,
+    $packageName.ToLowerInvariant())
 if (-not (Test-Path -LiteralPath $restoredPackage -PathType Leaf)) {
     throw "The private consumer cache does not contain restored package '$restoredPackage'. " +
         'The restore did not prove which release artifact supplied the public API.'
