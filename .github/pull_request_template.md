@@ -1,0 +1,3 @@
+## Contributor agreement
+
+- [ ] I have read and agree to CONTRIBUTING.md, including its contributor license terms.
