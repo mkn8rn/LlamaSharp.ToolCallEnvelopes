@@ -70,7 +70,10 @@ LlamaSharp adapter is in
 
 Manual control flow exposes the same compiled turn without choosing retries,
 dispatch policy, history storage, context reuse, or when the next turn should
-start. This is the open route for applications with their own orchestration.
+start. It does not require `ILlamaSharpToolExecutor` or
+`ToolEnvelopeRunner`. Existing application code may produce the model response
+through `ChatSession`, `ChatAsync`, `InferAsync`, or any other inference path;
+manual TCE code only creates the exact turn and parses its output.
 
 ```csharp
 var conversation = new List<ToolMessage>
@@ -83,12 +86,17 @@ var turn = plan.CreateTurn(
     conversation,
     ToolChoice.Auto);
 
-var reader = turn.CreateStreamReader();
-await foreach (var fragment in executor.InferAsync(turn, cancellationToken))
-    reader.Feed(fragment);
-
-var outcome = reader.Complete();
+// Existing application code produces this response using turn.Prompt and
+// turn.Grammar. No TCE executor interface is involved.
+string output = existingModelOutput;
+var outcome = turn.Parse(output);
 ```
+
+The host still maps `turn.Prompt` through the model's native chat template and
+attaches `turn.Grammar` with start rule `root`. It keeps its existing inference,
+retry, dispatch, history, and persistence code. The complete manual turn,
+streaming, and tool-loop examples are in
+[manual control](docs/manual-control.md).
 
 Read [getting started](https://github.com/Supprocom/LlamaSharp.ToolCallEnvelopes/blob/main/docs/getting-started.md)
 for the managed path, [manual control](https://github.com/Supprocom/LlamaSharp.ToolCallEnvelopes/blob/main/docs/manual-control.md)
