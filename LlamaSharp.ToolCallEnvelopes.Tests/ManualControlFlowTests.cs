@@ -1,5 +1,3 @@
-using System.Runtime.CompilerServices;
-
 namespace LlamaSharp.ToolCallEnvelopes.Tests;
 
 [TestFixture]
@@ -275,5 +273,24 @@ public sealed class ManualControlFlowTests
         new TestCaseData(choice, hostOutput, expectedOutcomeType)
             .SetName($"Manual_choice_{choice}");
 
-    private static string CurrentSourcePath([CallerFilePath] string path = "") => path;
+    private static string CurrentSourcePath()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null)
+        {
+            var sourcePath = Path.Combine(
+                directory.FullName,
+                "LlamaSharp.ToolCallEnvelopes.Tests",
+                "ManualControlFlowTests.cs");
+            if (File.Exists(sourcePath))
+                return sourcePath;
+            directory = directory.Parent;
+        }
+
+        throw new DirectoryNotFoundException(
+            $"The manual-control source guard started from '{AppContext.BaseDirectory}' but could "
+            + "not find the repository checkout containing ManualControlFlowTests.cs. Run the "
+            + "tests from a complete repository checkout so the dependency guard can inspect its "
+            + "source.");
+    }
 }
